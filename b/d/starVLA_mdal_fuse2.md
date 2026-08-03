@@ -1,6 +1,6 @@
-# starVLA 多模态输入与融合机制深度分析
+# starVLA 多模态输入、融合机制与基准表现深度分析
 
-> **一句话结论**：starVLA 通过 4 种输入模态（视觉 / 语言 / 本体感知状态 / 动作）、5 种感知骨干（Qwen-VL / PaliGemma / DINOv2 / CosmoPredict2 / Wan2.2）和 12 种融合机制，构建了当前开源 VLA 领域最灵活的可组合研究平台。
+> **一句话结论**：starVLA 通过 4 种输入模态（视觉 / 语言 / 本体感知状态 / 动作）、多类感知骨干和 12 种可组合融合机制覆盖了主流 VLA 动作接口；截至 **2026-07-16** 的公开结果表明，没有脱离 backbone、数据和评测协议而普遍最优的动作头。
 
 ---
 
@@ -12,7 +12,8 @@
 | **视觉骨干** | Qwen-VL ViT、PaliGemma SigLIP、DINOv2、CosmoPredict2 VAE+T5、Wan2.2 VAE+UMT5 |
 | **融合机制** | 12 种（详见第 6 章） |
 | **动作头** | Flow-matching DiT、Layer-wise FM、MLP L1、FAST 自回归、OpenPI Gemma、MaskGIT 离散扩散、VLA-Adapter 等 |
-| **框架数量** | 18+ 注册框架（VLM4A + WM4A 两大家族） |
+| **框架数量** | 当前源码含 27 个 registry 名（包含 `QwenFM`、`Pi0/Pi05` 大小写等兼容别名），分属 VLM4A 与 WM4A |
+| **证据截止日** | 2026-07-16（动态 leaderboard 需按引用日期重新核对） |
 
 ---
 
@@ -24,7 +25,7 @@
 - [第 3 章：语言/文本处理管线](#第-3-章语言文本处理管线)
 - [第 4 章：本体感知状态编码](#第-4-章本体感知状态编码)
 - [第 5 章：动作模态编码](#第-5-章动作模态编码)
-- [第 6 章：多模态融合机制——核心分析](#第-6-章多模态融合机制核心分析)
+- [第 6 章：多模态融合机制——核心分析与基准证据](#第-6-章多模态融合机制核心分析与基准证据)
 - [第 7 章：动作头条件化机制](#第-7-章动作头条件化机制)
 - [第 8 章：前向传播数据流分析](#第-8-章前向传播数据流分析)
 - [第 9 章：反向传播与梯度流分析](#第-9-章反向传播与梯度流分析)
@@ -53,33 +54,33 @@ starVLA 不是单一模型，而是一个**可组合的 VLA 研究平台**。其
 框架 = VLM 骨干 × 动作头 × 融合机制 × 数据管线
 ```
 
-通过 `@FRAMEWORK_REGISTRY.register("Name")` 注册模式（[base_framework.py:51](starVLA/model/framework/base_framework.py#L51)），用户可以自由组合不同的 VLM 骨干、动作头和融合方式，形成新的框架变体。
+通过 `@FRAMEWORK_REGISTRY.register("Name")` 注册模式（[base_framework.py:51](../../starVLA/model/framework/base_framework.py#L51)），用户可以自由组合不同的 VLM 骨干、动作头和融合方式，形成新的框架变体。
 
 ### 0.3 架构总览
 
 ```mermaid
 graph TB
-    subgraph "输入模态"
+    subgraph inputModalities [输入模态]
         V["🖼️ 视觉<br>Multi-view RGB"]
         L["📝 语言<br>Instruction Text"]
         S["🦾 状态<br>Joint/EEF State"]
         A["🎯 动作<br>Action Labels"]
     end
 
-    subgraph "感知骨干"
+    subgraph perceptionBackbones [感知骨干]
         VLM["VLM Family<br>Qwen-VL / PaliGemma / MiniCPM / Gemma4"]
         WM["World Model<br>CosmoPredict2 / Wan2.2"]
         DINO["DINOv2<br>Spatial Features"]
     end
 
-    subgraph "融合机制 (12种)"
+    subgraph fusionMechanisms [融合机制：12种]
         F1["VLM 内部融合"]
         F2["VLM→DiT 交叉注意力"]
         F3["双编码器/世界模型"]
         F4["特殊机制"]
     end
 
-    subgraph "动作头"
+    subgraph actionHeads [动作头]
         FM["Flow-matching DiT"]
         MLP["MLP L1 Regression"]
         FAST["FAST Autoregressive"]
@@ -121,19 +122,19 @@ graph TB
 
 ```mermaid
 graph LR
-    subgraph "数据层"
+    subgraph dataLayer [数据层]
         DS["LeRobot Dataset<br>(HDF5/Parquet)"]
         DC["DataConfig<br>modality_config()"]
         TR["Transform<br>Pipeline"]
     end
 
-    subgraph "DataLoader 层"
+    subgraph dataloaderLayer [DataLoader层]
         BD["build_dataloader()<br>__init__.py"]
         LD["LeRobotMixtureDataset"]
         PS["_pack_sample()"]
     end
 
-    subgraph "Framework 层"
+    subgraph frameworkLayer [Framework层]
         FW["framework.forward(examples)"]
         BI["build_*_inputs()"]
     end
@@ -142,7 +143,7 @@ graph LR
     BD --> LD --> PS --> FW --> BI
 ```
 
-`build_dataloader()` 函数（[__init__.py](starVLA/dataloader/__init__.py)）根据配置分发到 `lerobot_datasets` 或 `vlm_datasets`。对于 VLA 训练，核心数据集类是 `LeRobotMixtureDataset`，它根据 `DATASET_NAMED_MIXTURES` 混合多个数据集。
+`build_dataloader()` 函数（[__init__.py](../../starVLA/dataloader/__init__.py)）根据配置分发到 `lerobot_datasets` 或 `vlm_datasets`。对于 VLA 训练，核心数据集类是 `LeRobotMixtureDataset`，它根据 `DATASET_NAMED_MIXTURES` 混合多个数据集。
 
 ### 1.3 模态配置系统
 
@@ -176,7 +177,7 @@ ModalityConfig = {
 }
 ```
 
-`LeRobotStateActionMetadata`（[schema.py](starVLA/dataloader/gr00t_lerobot/schema.py)）定义了每个状态/动作维度的起止索引、旋转类型、是否绝对值、数据类型和范围。
+`LeRobotStateActionMetadata`（[schema.py](../../starVLA/dataloader/gr00t_lerobot/schema.py)）定义了每个状态/动作维度的起止索引、旋转类型、是否绝对值、数据类型和范围。
 
 ### 1.4 Collate 与 Batch 格式
 
@@ -233,7 +234,7 @@ sequenceDiagram
     I-->>F: hidden states for action head
 ```
 
-关键代码路径（[QWen3.py:114-171](starVLA/model/modules/vlm/QWen3.py#L114-L171)）：
+关键代码路径（[QWen3.py:114-171](../../starVLA/model/modules/vlm/QWen3.py#L114-L171)）：
 
 ```python
 def build_qwenvl_inputs(self, images, instructions, solutions=None):
@@ -269,7 +270,7 @@ PaliGemma 是 PI0/PI05 框架使用的视觉骨干，采用 SigLIP（Sigmoid Los
 - **Hidden Dimension**: 1152
 - **特点**: 图像 token 直接线性映射到 Gemma 嵌入空间，无需额外适配器
 
-处理流程通过 `OpenPIPaliGemma` 类（[OpenPIPaliGemma.py](starVLA/model/modules/vlm/OpenPIPaliGemma.py)）实现：
+处理流程通过 `OpenPIPaliGemma` 类（[OpenPIPaliGemma.py](../../starVLA/model/modules/vlm/OpenPIPaliGemma.py)）实现：
 
 ```python
 # 图像预处理
@@ -433,7 +434,7 @@ datasets:
 
 ### 3.4 PaliGemma 文本处理
 
-PI0/PI05 使用 `LazyPaliGemmaTokenizer`（[PI0.py:92-133](starVLA/model/framework/VLM4A/PI0.py#L92-L133)）进行文本处理，与 Qwen 系列有显著差异：
+PI0/PI05 使用 `LazyPaliGemmaTokenizer`（[PI0.py:92-133](../../starVLA/model/framework/VLM4A/PI0.py#L92-L133)）进行文本处理，与 Qwen 系列有显著差异：
 
 ```python
 class LazyPaliGemmaTokenizer:
@@ -479,7 +480,7 @@ class LazyPaliGemmaTokenizer:
 
 $$s_{\text{emb}} = W_2 \cdot \text{ReLU}(W_1 \cdot s + b_1) + b_2$$
 
-实现位于 `FlowmatchingActionHead`（[GR00T_ActionHeader.py:52-59](starVLA/model/modules/action_model/GR00T_ActionHeader.py#L52-L59)）：
+实现位于 `FlowmatchingActionHead`（[GR00T_ActionHeader.py:52-59](../../starVLA/model/modules/action_model/GR00T_ActionHeader.py#L52-L59)）：
 
 ```python
 class MLP(nn.Module):
@@ -604,7 +605,7 @@ $$a_{\text{emb}} = W_3(\text{swish}(W_2([W_1(a) \oplus \text{SinPE}(\tau)])))$$
 
 其中 $\text{SinPE}(\tau)$ 是正弦位置编码生成的时间步嵌入。
 
-实现细节（[GR00T_ActionHeader.py:62-101](starVLA/model/modules/action_model/GR00T_ActionHeader.py#L62-L101)）：
+实现细节（[GR00T_ActionHeader.py:62-101](../../starVLA/model/modules/action_model/GR00T_ActionHeader.py#L62-L101)）：
 
 ```python
 class ActionEncoder(nn.Module):
@@ -622,7 +623,7 @@ class ActionEncoder(nn.Module):
         return self.layer3(x)                                     # [B, T, w]
 ```
 
-**Flow-matching 训练**（[GR00T_ActionHeader.py:312-363](starVLA/model/modules/action_model/GR00T_ActionHeader.py#L312-L363)）：
+**Flow-matching 训练**（[GR00T_ActionHeader.py:312-363](../../starVLA/model/modules/action_model/GR00T_ActionHeader.py#L312-L363)）：
 
 核心公式——噪声轨迹的线性插值与速度预测：
 
@@ -640,7 +641,7 @@ def sample_time(self, batch_size, device, dtype):
     return (self.config.noise_s - sample) / self.config.noise_s
 ```
 
-**推理**——Euler 积分去噪（[GR00T_ActionHeader.py:365-421](starVLA/model/modules/action_model/GR00T_ActionHeader.py#L365-L421)）：
+**推理**——Euler 积分去噪（[GR00T_ActionHeader.py:365-421](../../starVLA/model/modules/action_model/GR00T_ActionHeader.py#L365-L421)）：
 
 $$x_{t+\Delta t} = x_t + \Delta t \cdot v_\theta(x_t, t)$$
 
@@ -667,7 +668,7 @@ graph LR
     MAP --> VLM["VLM 序列<br>append as assistant response"]
 ```
 
-训练流程（[QwenFast.py:125-176](starVLA/model/framework/VLM4A/QwenFast.py#L125-L176)）：
+训练流程（[QwenFast.py:125-176](../../starVLA/model/framework/VLM4A/QwenFast.py#L125-L176)）：
 
 ```python
 def forward(self, examples):
@@ -684,7 +685,7 @@ def forward(self, examples):
     vlm_action_loss = self.qwen_vl_interface(**qwen_inputs).loss
 ```
 
-推理流程——需要反向映射（[QwenFast.py:178-222](starVLA/model/framework/VLM4A/QwenFast.py#L178-L222)）：
+推理流程——需要反向映射（[QwenFast.py:178-222](../../starVLA/model/framework/VLM4A/QwenFast.py#L178-L222)）：
 
 ```python
 def predict_action(self, examples):
@@ -698,7 +699,7 @@ def predict_action(self, examples):
     normalized_actions = self.action_model.fast_tokenizer.decode(batch_fast_action_token_idx)
 ```
 
-**特殊 Token 范围**（[QWen3.py:21-23](starVLA/model/modules/vlm/QWen3.py#L21-L23)）：
+**特殊 Token 范围**（[QWen3.py:21-23](../../starVLA/model/modules/vlm/QWen3.py#L21-L23)）：
 
 ```python
 _ACTION_TOKEN_MIN = 151669   # <robot_action_0>
@@ -718,7 +719,7 @@ prompt_suffix = f" Please predict the next {self.chunk_len} robot actions: <acti
 instructions = [instr + prompt_suffix for instr in instructions]
 ```
 
-VLM 前向传播后，在 "🔍" 位置提取隐状态（[QwenOFT.py:278-330](starVLA/model/framework/VLM4A/QwenOFT.py#L278-L330)）：
+VLM 前向传播后，在 "🔍" 位置提取隐状态（[QwenOFT.py:278-330](../../starVLA/model/framework/VLM4A/QwenOFT.py#L278-L330)）：
 
 ```python
 def _gather_action_token_embeddings(self, last_hidden, input_ids, action_token_id):
@@ -735,7 +736,7 @@ $$\mathcal{L} = \|{a} - \hat{a}\|_1 \quad \text{(L1 损失)}$$
 
 ### 5.4 多机器人实体编码器
 
-`CategorySpecificLinear`（[GR00T_ActionHeader.py:25-37](starVLA/model/modules/action_model/GR00T_ActionHeader.py#L25-L37)）支持**不同机器人形态共享同一个动作头**：
+`CategorySpecificLinear`（[GR00T_ActionHeader.py:25-37](../../starVLA/model/modules/action_model/GR00T_ActionHeader.py#L25-L37)）支持**不同机器人形态共享同一个动作头**：
 
 ```python
 class CategorySpecificLinear(nn.Module):
@@ -771,610 +772,670 @@ class MultiEmbodimentActionEncoder(nn.Module):
 
 ---
 
-## 第 6 章：多模态融合机制——核心分析
+## 第 6 章：多模态融合机制——核心分析与基准证据
 
-> 这是本文的核心章节。starVLA 实现了 12 种多模态融合机制，可归为 4 大类。每种机制代表了不同的**模态交互哲学**。
+> 本章以当前本地源码为第一事实来源，并补充截至 **2026-07-16（UTC+8）** 可核验的论文、官方项目页、模型卡和 leaderboard。这里的“融合机制”描述视觉、语言、状态、历史与动作流在哪里、以何种注意力关系发生交互；“动作头条件化”描述动作解码器如何接收这些条件并生成动作。二者相关，但不是同一个概念。
 
-![Fusion Mechanism Comparison](asset/fusion_mechanism_comparison.png)
+### 6.0 阅读口径：机制不是排行榜的唯一自变量
 
-### 融合机制总览
+同一种融合机制可以配不同 VLM、训练数据、动作空间和推理预算；同一个模型也常组合多种机制。因此不能把最终成功率简单归因于某一个模块。本章采用以下证据等级：
+
+| 等级 | 证据类型 | 本章使用方式 |
+|---|---|---|
+| A | 官方统一复测或主办方控制的真机评测 | 可以在同一赛道内排序，必须标注日期 |
+| B | 官方提交榜或官方模型卡 | 可比较同协议提交，注明是否作者自报 |
+| C | 同一论文/项目中的静态实验表 | 适合论文内部对比与消融，不外推为全局 SOTA |
+| D | 跨论文社区聚合 | 仅作线索，不用于严格架构结论 |
+
+特别注意：
+
+1. CALVIN 的 D→D、ABCD→D、ABC→D 不是同一协议。
+2. SimplerEnv 的 Google Robot Visual Matching、Variant Aggregation、WidowX/Bridge 不能混排。
+3. RoboCasa GR-1 Tabletop、RoboCasa Kitchen 与 RoboCasa365 不是同一任务集。
+4. RoboTwin 的 50 demonstrations 与 50+500 demonstrations、Clean/Easy 与 Randomized/Hard 必须分开。
+5. LIBERO 单 suite 策略、四 suite 单一策略以及 LIBERO-Plus 零样本评测不能直接互换。
+
+### 6.0.1 四大类、十二种机制
 
 ```mermaid
-graph TB
-    subgraph "Category I: VLM 内部融合"
-        F1["6.1 Token 拼接"]
-        F5["6.5 序列内动作 Token 回归"]
-        F6["6.6 自回归离散 Token"]
-    end
+flowchart TB
+  subgraph cat1 [Category I：VLM内部统一序列]
+    F61["6.1 视觉语言Token拼接"]
+    F65["6.5 动作Query回归"]
+    F66["6.6 自回归动作Token"]
+  end
 
-    subgraph "Category II: VLM→DiT 交叉注意力"
-        F2["6.2 单层 Hidden→DiT"]
-        F3["6.3 逐层交叉注意力 DiT"]
-        F4["6.4 逐层 QFormer 聚合"]
-    end
+  subgraph cat2 [Category II：表征到动作专家]
+    F62["6.2 单层Hidden到Cross-DiT"]
+    F63["6.3 多层Hidden到Layerwise-DiT"]
+    F64["6.4 QFormer或Latent瓶颈"]
+  end
 
-    subgraph "Category III: 双编码器/世界模型"
-        F7["6.7 交错式 VLM+动作专家"]
-        F8["6.8 双编码器拼接"]
-        F9["6.9 世界模型特征提取"]
-    end
+  subgraph cat3 [Category III：多编码器与世界模型]
+    F67["6.7 逐层共享动作专家"]
+    F68["6.8 双编码器或多流融合"]
+    F69["6.9 世界模型与未来表征"]
+  end
 
-    subgraph "Category IV: 特殊机制"
-        F10["6.10 离散化状态文本注入"]
-        F11["6.11 LangForce 双分支"]
-        F12["6.12 VLA-Adapter"]
-    end
+  subgraph cat4 [Category IV：正交增强机制]
+    F610["6.10 状态文本化"]
+    F611["6.11 双分支语言约束"]
+    F612["6.12 Adapter门控融合"]
+  end
 ```
+
+其中 6.1 是 Qwen-VL 系模型的基础层；6.10 是可叠加在 6.3、6.5、6.7 上的状态编码方式；6.11、6.12 也会复用其他动作头。因而十二类是“机制维度”，不是互斥的十二个模型家族。
+
+### 6.0.2 本地模型 × 主融合机制 × 动作头条件化
+
+| 本地模型 | 主融合机制 | 动作头 | 视觉/语言条件如何进入动作头 | state / time 条件 | 训练目标与推理 |
+|---|---|---|---|---|---|
+| QwenGR00T、Gemma4GR00T、MiniCPMGR00T、CosmosGR00T | 6.2 | `FlowmatchingActionHead` | 最后一层 hidden 作所有 cross-attn 的 K/V | state MLP 拼接；time→AdaLN | velocity MSE；Euler |
+| QwenPI / QwenFM | 6.3 | `LayerwiseFlowmatchingActionHead` | `hidden_states[-N:]` 按 block 下标路由 | state MLP；time→AdaLN | velocity MSE；Euler/RTC |
+| QwenPI_v3 | 6.3 + 6.10 | 同上 | 每层 LN+Linear 压缩后逐层路由 | state 量化进文本；time→AdaLN | velocity MSE；Euler/RTC |
+| QwenDiscreteDiffusion | 6.3 | `LayerwiseDiscreteDiffusionActionHead` | 多层 VLM hidden 作逐层 K/V | 离散动作 token；迭代 mask | CE/BCE，可选 L1；MaskGIT |
+| InternVLA-M1 | 6.4 + 6.8 | `DiTActionHeader` | VLM 多层+DINO→QFormer→定长条件 | timestep embed；CFG | 噪声 MSE；DDIM |
+| QwenOFT | 6.5，可叠加 6.10 | `L1RegressionActionHead` | VLM 内 action placeholder hidden | 可选 state 文本化 | L1；单次前向 |
+| QwenFast | 6.6 | VLM LM head + FAST tokenizer | 动作本身成为 assistant token | 无独立 DiT 条件化 | CE；自回归生成 |
+| PI0 / PI05 | 6.7；PI05+6.10 | `OpenPI0/05ActionHead` | VLM prefix 与 action expert 每层联合注意力 | PI0 state token；PI05 state 文本化、adaRMS | velocity MSE；Euler+KV cache |
+| QwenDual | 6.8 + 6.2 | `FlowmatchingActionHead` | Qwen hidden 与 DINO token 拼接后作 K/V | state MLP；time→AdaLN | velocity MSE；Euler |
+| Wan/CosmoPredict2 GR00T | 6.9 + 6.2 | `FlowmatchingActionHead` | 世界模型最后层特征作 K/V | state MLP；time→AdaLN | velocity MSE；Euler |
+| Wan/CosmoPredict2 PI | 6.9 + 6.3 | `LayerwiseFlowmatchingActionHead` | 世界模型多 block 特征逐层作 K/V | state MLP；time→AdaLN | velocity MSE；Euler |
+| Wan/CosmoPredict2 OFT | 6.9 + 6.5 | MLP L1 | 世界模型特征池化后展开动作 query | 可选 state 文本化 | L1；单次前向 |
+| LangForce | 6.11 + 6.2 | `FlowmatchingActionHead` | 双 VLM 前向产生 latent-action-query context | PMI/LLR 语言约束 + FM | 复合损失；源码推理用 posterior 顺序 |
+| QwenAdapter | 6.12 | `VLA_Adapter_L1RegressionActionHead` | embedding hook 注入 query，多层特征门控融合 | `ProprioProjector` | L1；单次前向 |
+| ABot_M0 | 多视觉编码器 + 6.2 | `AML_ActionHeader` | Qwen-VL 与 VGGT 表征融合后作 K/V | state/time 同 FM | 带 mask 的 FM |
 
 ---
 
 ### 6.1 VLM 序列内 Token 拼接
 
-**所有 Qwen 框架的基础融合方式。**
+#### 机制与动作头条件化
+
+视觉 patch 经视觉塔和 projector 映射到语言隐藏空间，与文本 token 组成统一序列：
+
+$$X=[x_{\text{vision}},x_{\text{text}},x_{\text{optional-state}},x_{\text{optional-action-query}}]$$
+
+VLM 内部先完成视觉—语言融合，之后模型可选择：
+
+- 把最后层或多层 hidden 作为外置动作头的 K/V（6.2、6.3）；
+- 在 action query 位置直接回归动作（6.5、6.12）；
+- 用 LM head 生成离散动作 token（6.6）；
+- 与动作专家做逐层联合注意力（6.7）。
+
+因此，6.1 本身没有唯一动作头。它决定的是基础多模态表征，不能把后续成绩单独归功于“token 拼接”。
 
 ```mermaid
-graph LR
-    IMG["🖼️ Image Tokens"] --> CAT["⊕ Sequence<br>Concatenation"]
-    TXT["📝 Text Tokens"] --> CAT
-    CAT --> VLM["VLM Self-Attention<br>(All Qwen Layers)"]
-    VLM --> HS["Hidden States<br>[B, L_total, H]"]
+flowchart LR
+  imageTokens[视觉Token] --> unifiedSeq[统一VLM序列]
+  textTokens[文本Token] --> unifiedSeq
+  stateTokens[可选状态Token] --> unifiedSeq
+  unifiedSeq --> vlmLayers[VLM全层注意力]
+  vlmLayers --> crossHead[Cross-DiT]
+  vlmLayers --> mlpHead[MLP回归]
+  vlmLayers --> lmHead[LM动作Token]
+  vlmLayers --> sharedExpert[共享动作专家]
 ```
 
-**原理**：将视觉 token 和文本 token 拼接为一个统一序列，利用 VLM 的**因果自注意力**机制实现跨模态交互。这是最自然、最简单的融合方式——所有模态在同一个序列空间中通过 attention 自由交互。
+#### 使用模型
 
-**数学描述**：
+- 本地：所有 Qwen-VL、Gemma4、MiniCPM、Cosmos-Reason2 VLM 路线。
+- 外部：OpenVLA/OFT、Qwen-RobotManip、GR00T N1.x、LangForce、RLDX-1 等都先进行某种视觉—语言 token 融合。
 
-$$\text{Sequence} = [\underbrace{v_1, v_2, \ldots, v_M}_{\text{视觉 tokens}}, \underbrace{t_1, t_2, \ldots, t_N}_{\text{文本 tokens}}]$$
+#### Benchmark 解读
 
-$$h_i^{(l)} = \text{Attention}(Q_i^{(l)}, K_{1:i}^{(l)}, V_{1:i}^{(l)}) \quad \text{(因果 mask)}$$
-
-**代码路径**：`build_qwenvl_inputs()` 构造多模态序列 → VLM 前向 → 提取 hidden states
-
-**重要细节**：Qwen-VL 的视觉 token 经过内部 spatial merge 压缩后，与文本 token 共享相同的嵌入空间。每个视觉 token 通过 M-RoPE 编码了其在原始图像中的 2D 位置。
-
-**优势**：零额外参数，全连接交互，可利用预训练的跨模态注意力。
-
-**劣势**：序列长度与视角数线性增长，计算复杂度 $O(L^2)$。
-
-**使用框架**：所有 Qwen-VL 基础框架（作为基础层，上层机制在此基础上进一步处理 hidden states）。
+同样使用 VLM token 融合，LIBERO 可从 π0-FAST 的 85.5 到 Qwen-RobotManip-Context 的 99.2；差距主要来自数据、backbone、动作接口和训练策略。6.1 是必要基础，不是可独立排名的动作解码算法。
 
 ---
 
-### 6.2 单层 Hidden State → 交叉注意力 DiT
+### 6.2 单层 Hidden State → 交叉注意力 Flow-DiT
 
-**starVLA 中使用最广泛的动作融合模式。**
+#### 代码事实
 
-```mermaid
-graph TB
-    VLM["VLM Forward"] --> LH["last_hidden_state<br>hidden_states[-1]<br>[B, L, H]"]
-    LH --> REP["Repeat<br>×repeated_diffusion_steps"]
-    REP --> CA["Cross-Attention DiT<br>(16 layers, interleaved<br>self-attn + cross-attn)"]
+`QwenGR00T.py` 取 `hidden_states[-1]`。动作头把 noisy action、future tokens 与可选 state token 组成 Query 序列；VLM 最后一层作为 cross-attention 的 K/V；flow timestep 同时进入 `ActionEncoder` 和 AdaLayerNorm。
 
-    subgraph "DiT Input Sequence"
-        SE["State Encoder<br>[B, 1, D]"]
-        FT["Future Tokens<br>[B, N_f, D]"]
-        AE["ActionEncoder<br>[B, T, D]"]
-    end
+$$x_t=(1-t)\epsilon+t a,\qquad v^\*=a-\epsilon$$
 
-    SE & FT & AE --> CONCAT["⊕ Concat"]
-    CONCAT --> CA
-    CA --> DEC["Action Decoder MLP<br>[B, T, D_a]"]
-```
+$$\mathcal{L}_{FM}=\lVert v_\theta(x_t,t,c)-v^\*\rVert_2^2$$
 
-**核心思想**：VLM 的最后一层 hidden state 作为"上下文记忆"，通过交叉注意力机制影响 DiT 动作头中的去噪过程。
+当 `interleave_self_attention=True` 时，偶数 block cross-attend VLM，奇数 block 做动作序列 self-attention；单层 context 会被所有 cross block 复用。
 
-**实现路径**（[QwenGR00T.py:167-221](starVLA/model/framework/VLM4A/QwenGR00T.py#L167-L221)）：
+#### 使用模型与变体
 
-```python
-# Step 1: VLM 编码
-qwenvl_outputs = self.qwen_vl_interface(**qwen_inputs, output_hidden_states=True)
-last_hidden = qwenvl_outputs.hidden_states[-1]  # [B, L, H]
+- 本地：QwenGR00T、Gemma4GR00T、MiniCPMGR00T、CosmosGR00T、QwenDual（双编码器先拼接）、LangForce（latent query context）、ABot_M0，以及 WM4A 的 GR00T 变体。
+- 外部近邻：GR00T N1/N1.6/N1.7、Qwen-RobotManip、DM0 等“语义 VLM/System-2 + 连续动作专家/System-1”模型。外部实现可能选择中间层或多个层，不应假定与本地 `hidden_states[-1]` 完全相同。
 
-# Step 2: 重复采样（more noise samples per batch）
-last_hidden_repeated = last_hidden.repeat(repeated_diffusion_steps, 1, 1)
-actions_target_repeated = actions_target.repeat(repeated_diffusion_steps, 1, 1)
+#### 代表成绩
 
-# Step 3: 动作头前向
-action_loss = self.action_model(
-    last_hidden_repeated,          # VLM context → cross-attention K,V
-    actions_target_repeated,       # 目标动作（训练用）
-    state_repeated,                # 状态嵌入（可选）
-)
-```
+| 模型与协议 | 成绩 | 证据与解释 |
+|---|---:|---|
+| StarVLA-GR00T Qwen3，LIBERO 四套件单策略 | 96.5 Avg | 本仓库同表 C；Spatial/Object/Goal/Long=97.8/98.8/97.4/92.0 |
+| StarVLA-GR00T Qwen2.5-Action，CALVIN D→D | 3.786 平均链长 | 本仓库 C；不可与 ABC→D 榜混排 |
+| StarVLA-GR00T，DOMINO clean dynamic α=0.1 | SR 6.10 / MS 28.60 | 本仓库 C |
+| StarVLA-GR00T-Qwen3，RoboCasa GR-1 Tabletop | 47.8 Avg | 24 tasks，50 rollouts/task，C |
+| Qwen3VL-GR00T Bridge+RT-1，SimplerEnv WidowX | 65.3 | 本仓库模型卡 B |
+| Qwen-RobotManip-Context，LIBERO | 99.2 | 官方仓库/论文 C；benchmark-specific checkpoint |
+| Qwen-RobotManip-Context，RoboTwin Easy/Hard | 93.7 / 94.0 | 官方仓库 C |
+| Qwen-RobotManip-Context，LIBERO-Plus | 91.4 | OOD 七扰动，论文 C |
+| Qwen-RobotManip，RoboCasa365 | 35.9 | 论文 C；2026-07-09 动态榜已有更高提交，不能称当前第一 |
+| Qwen-RobotManip，RoboChallenge Table30 v1 generalist | SR 45.0 / Score 59.83 | 官方项目引用的比赛结果 B，注意不是 Table30 V2 |
+| DM0，RoboChallenge Table30 Specialist / Generalist | SR 62.0 / 37.33；Score 72.25 / 49.08 | Dexbotic 官方文档 B；两个赛道不能混排 |
+| GR00T N1.7，LIBERO | 约 96.5–96.99 | NVIDIA/LeRobot 两条评测路径，配置不同，C |
 
-**DiT 内部流程**（[cross_attention_dit.py:272-331](starVLA/model/modules/action_model/flow_matching_head/cross_attention_dit.py#L272-L331)）：
+#### 结论
 
-```python
-class DiT(ModelMixin, ConfigMixin):
-    def forward(self, hidden_states, encoder_hidden_states, timestep):
-        temb = self.timestep_encoder(timestep)  # 时间步嵌入
-
-        for idx, block in enumerate(self.transformer_blocks):
-            if idx % 2 == 1 and interleave_self_attention:
-                # 奇数层：自注意力（动作 token 间交互）
-                hidden_states = block(hidden_states, encoder_hidden_states=None, temb=temb)
-            else:
-                # 偶数层：交叉注意力（动作 attend to VLM hidden）
-                hidden_states = block(
-                    hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,  # VLM context
-                    temb=temb,
-                )
-
-        # 输出层：AdaLN 调制 + 线性投影
-        shift, scale = self.proj_out_1(F.silu(temb)).chunk(2, dim=1)
-        hidden_states = self.norm_out(hidden_states) * (1 + scale[:, None]) + shift[:, None]
-        return self.proj_out_2(hidden_states)
-```
-
-**交错 self/cross-attention 的设计**：偶数层做交叉注意力（从 VLM context 提取信息），奇数层做自注意力（动作序列内部交互）。这种交错模式允许动作序列在"看到"VLM 信息后进行内部推理。
-
-**使用框架**：QwenGR00T, CosmosGR00T, WanGR00T, MiniCPMGR00T, Gemma4GR00T, QwenDual 等（共 9 个框架）
+单层 cross-DiT 的优势是接口清晰、context 缓存简单、动作流有充分 self-attention；缺点是所有动作层只能读取同一语义层。Qwen-RobotManip 表明规模化数据与对齐可让该范式取得很强 OOD 成绩，但不能据此证明“最后一层优于逐层”。
 
 ---
 
-### 6.3 逐层交叉注意力 DiT
+### 6.3 逐层 Hidden State → Layer-wise Cross-DiT
 
-**QwenPI 系列的核心创新——利用 VLM 的多层特征，而非仅用最后一层。**
+#### 正确的本地路由规则
+
+本地 QwenPI 系列遵循：
+
+```text
+N = num_vl_layers = num_dit_blocks
+vl_embs_list = hidden_states[-N:]
+cross block idx 使用 encoder_hidden_states[idx]
+```
+
+**不是** `2N` 个 DiT block。还必须区分：
+
+- `interleave_self_attention=False`：N 个 block 全部 cross-attn，VLM N 层一一使用；
+- `interleave_self_attention=True`：奇数 block 是 self-attn，只有偶数下标 VLM hidden 被使用，奇数下标列表元素不会进入 cross-attn。
 
 ```mermaid
-graph TB
-    VLM["VLM Forward<br>output_hidden_states=True"] --> HS["hidden_states[-N:]<br>N层隐状态列表"]
-
-    subgraph "Per-layer Projection"
-        P1["project_layers[0]<br>LayerNorm + Linear"]
-        P2["project_layers[1]<br>LayerNorm + Linear"]
-        PN["project_layers[N-1]<br>LayerNorm + Linear"]
-    end
-
-    HS --> P1 & P2 & PN
-
-    subgraph "Layer-wise DiT"
-        D1["DiT Block 0<br>cross-attn ← proj[0]"]
-        D2["DiT Block 1<br>self-attn"]
-        D3["DiT Block 2<br>cross-attn ← proj[1]"]
-        DN["DiT Block 2N-1<br>self-attn"]
-    end
-
-    P1 --> D1
-    P2 --> D3
-    D1 --> D2 --> D3 --> DN
+flowchart LR
+  subgraph noInterleave [interleave为false]
+    V0[VLM0] --> D0[DiT0Cross]
+    V1[VLM1] --> D1[DiT1Cross]
+    V2[VLM2] --> D2[DiT2Cross]
+  end
+  subgraph withInterleave [interleave为true]
+    W0[VLM0] --> E0[DiT0Cross]
+    E0 --> E1[DiT1Self]
+    W2[VLM2] --> E2[DiT2Cross]
+  end
 ```
 
-**关键创新**：VLM 的每一层 hidden state 都包含不同抽象级别的信息——底层包含局部视觉特征，顶层包含语义理解。通过逐层交叉注意力，动作头可以同时利用所有层次的信息。
+QwenPI 让 DiT hidden 与 VLM hidden 同维；QwenPI_v3 为每个层设置独立 `LayerNorm+Linear`，如 2560→1024，并把 state 离散为文本。公开的 `Qwen3VL-PI_v3-Bridge-RT_1` checkpoint 使用 `interleave_self_attention=false`，与代码默认值必须分开陈述。
 
-**投影层设计**（[QwenPI_v3.py:217-229](starVLA/model/framework/VLM4A/QwenPI_v3.py#L217-L229)）：
+#### 使用模型
 
-```python
-self.project_layers = nn.ModuleList([
-    (
-        nn.Identity()
-        if llm_hidden_size == self.action_dit_hidden_dim
-        else nn.Sequential(
-            nn.LayerNorm(llm_hidden_size),
-            nn.Linear(llm_hidden_size, self.action_dit_hidden_dim),
-        )
-    )
-    for _ in range(self.num_action_dit_layers)
-])
-```
+- 本地连续 FM：QwenPI/QwenFM、QwenPI_v3、Gemma4PI、MiniCPMPI、WanPI、CosmoPredict2PI。
+- 本地离散扩散：QwenDiscreteDiffusion，复用逐层 K/V，但把动作改成 MaskGIT 式离散恢复。
+- 外部近邻：Discrete Diffusion VLA 的“统一离散扩散”思想相近，但其论文实现不是本地 LayerwiseFM 的同一代码；不能把两者混为同一架构。
 
-每个投影层将 VLM hidden state 从 `llm_hidden_size`（如 2048）压缩到 `action_dit_hidden_dim`（如 1024），这是 QwenPI_v3 的关键参数节省手段。
+#### 代表成绩
 
-**参数分布**：
+| 模型与协议 | 成绩 | 解释 |
+|---|---:|---|
+| StarVLA-π Qwen3，LIBERO | 95.7 Avg | 98.8/99.6/95.8/88.4；Long 弱于同表 OFT/GR00T |
+| StarVLA-π Qwen3，LIBERO-Plus 零样本 | 77.0 Total | 本仓库同一 LIBERO checkpoint C |
+| Qwen3VL-PI_v3 Bridge+RT-1，SimplerEnv WidowX | 69.8 | 50k checkpoint；四任务 62.5/100/79.2/37.5 |
+| QwenPI Qwen2.5-Action，CALVIN D→D | 3.576 | 同表低于 GR00T 3.786 与 PI0.5 3.885 |
+| StarVLA-π-Qwen3，RoboCasa GR-1 Tabletop | 43.9 | 同表低于 OFT 48.8、GR00T 47.8 |
+| Discrete Diffusion VLA，LIBERO | 96.3–96.4 | 论文版本口径略有变化，C |
+| Discrete Diffusion VLA，SimplerEnv-Fractal | VM 71.2 / Overall 64.1 | C |
+| Discrete Diffusion VLA，SimplerEnv-Bridge | Overall 54.2 | OpenReview/修订版；早期页面曾报 49.3，采用最新摘要并注明版本差异 |
 
-```
-Module                          Params        %
-────────────────────────────────────────────
-qwen_vl_interface         4,437,815,808   87.5%
-action_model                538,678,305   10.6%
-project_layers               94,593,024    1.9%
-────────────────────────────────────────────
-TOTAL                     5,071,087,137  100.0%
-```
+#### 消融含义
 
-投影层仅占总参数的 1.9%，但显著降低了动作头的维度（$D_{\text{DiT}} = 1024$ vs $D_{\text{VLM}} = 2048$），从而减少了约 75% 的动作头参数。
-
-**DiT 内部的逐层路由**（[cross_attention_dit.py:296-316](starVLA/model/modules/action_model/flow_matching_head/cross_attention_dit.py#L296-L316)）：
-
-```python
-for idx, block in enumerate(self.transformer_blocks):
-    if idx % 2 == 1 and interleave_self_attention:
-        hidden_states = block(hidden_states, encoder_hidden_states=None, temb=temb)
-    else:
-        if is_layerwise_encoder:
-            # 逐层路由：每个交叉注意力层使用不同的 VLM hidden state
-            block_encoder_hidden_states = encoder_hidden_states[idx]
-        else:
-            block_encoder_hidden_states = encoder_hidden_states
-        hidden_states = block(hidden_states, encoder_hidden_states=block_encoder_hidden_states, temb=temb)
-```
-
-**与 6.2 的关键区别**：
-
-| 特征 | 单层 (6.2) | 逐层 (6.3) |
-|------|-----------|------------|
-| VLM 输出 | `hidden_states[-1]` | `hidden_states[-N:]` |
-| DiT 输入 | 所有层共享同一 context | 每层使用不同 VLM 层的特征 |
-| 信息利用 | 仅顶层语义 | 多层次（从局部到全局） |
-| 额外参数 | 无 | `N × (LN + Linear)` 投影层 |
-| 代表 | QwenGR00T (GR00T N1) | QwenPI_v3 (π₀.5 风格) |
-
-**使用框架**: QwenPI, QwenPI_v3, GemmaPI, MiniCPMPI, CosmoPredict2PI, WanPI
+受控 StarVLA LIBERO 表中，Qwen3-VL 的 OFT/GR00T/π/FAST 分别为 96.6/96.5/95.7/95.4。逐层 FM 并未在饱和的域内评测中胜出；但 PI_v3 在相近 Bridge+RT-1 设置下比 Qwen3VL-GR00T 高 4.5 个百分点。该差异同时包含 state 文本化、DiT 压缩、checkpoint 与 `interleave` 配置，不能当成纯“逐层特征”消融。
 
 ---
 
-### 6.4 逐层 QFormer 聚合
+### 6.4 逐层 QFormer / Latent Bottleneck 聚合
 
-**InternVLA-M1 的独特融合方式——使用 QFormer 作为跨模态信息聚合器。**
+#### 本地机制
+
+InternVLA-M1 将 DINOv2 空间 token 投影后，与 VLM 多层 hidden 分层拼接；QFormer 用固定 learned queries 压缩变长 context。压缩结果不是 LayerwiseFM 的 K/V 列表，而是送入 `DiTActionHeader` 的定长条件；其动作生成是 DDPM 噪声预测、DDIM 采样，并支持 CFG。
 
 ```mermaid
-graph TB
-    DINO["DINOv2<br>[B, N_dino, D_dino]"] --> PROJ["Linear Proj<br>D_dino → D_vlm"]
-    VLM["VLM per-layer<br>hidden states"] --> CONCAT["⊕ Concat<br>per layer"]
-    PROJ --> CONCAT
-
-    CONCAT --> QF["QFormer<br>(Learnable Queries)"]
-    QF --> AGG["Aggregated Features<br>[B, N_query, D]"]
-    AGG --> DiT["Cross-Attention DiT"]
+flowchart LR
+  image[图像] --> dino[DINO空间特征]
+  image --> vlm[VLM多层特征]
+  language[语言] --> vlm
+  dino --> perLayer[逐层拼接]
+  vlm --> perLayer
+  perLayer --> qformer[QFormer定长瓶颈]
+  qformer --> ddpmDiT[DDPM动作DiT加CFG]
 ```
 
-M1 框架（[M1.py](starVLA/model/framework/VLM4A/M1.py)）的创新在于：
+#### 使用模型与演进
 
-1. **双编码器特征融合**：Qwen-VL 的 per-layer hidden states 与 DINOv2 的空间特征逐层拼接
-2. **QFormer 聚合**：使用可学习 query tokens 从拼接特征中提取固定长度的聚合表示
-3. **信息瓶颈**：QFormer 的 query 数量形成天然的信息瓶颈，强制模型提取最相关的信息
+- 本地：InternVLA-M1。
+- 外部演进：InternVLA-A1.5 不再只是静态 QFormer 压缩，而用 foresight tokens 查询未来相关 latent，并以 mixture/shared Transformer 将理解、未来表征和 flow action expert 结合。它应视为 6.4+6.9 的演进近邻，而非 M1 的同构实现。
 
-```python
-# M1.py 核心逻辑
-dino_features = self.dino_backbone(images)        # [B, N_patches, D_dino]
-dino_projected = self.dino_pro(dino_features)      # [B, N_patches, D_vlm]
+#### 代表成绩
 
-# 逐层融合
-for layer_idx in range(N):
-    vlm_hidden = vlm_hidden_states[layer_idx]      # [B, L_vlm, D_vlm]
-    fused = torch.cat([vlm_hidden, dino_projected], dim=1)  # [B, L_vlm+N_patches, D_vlm]
-    aggregated = qformer(fused, query_tokens)       # [B, N_query, D_vlm]
-```
+| 模型 | Benchmark | 成绩 |
+|---|---|---:|
+| InternVLA-M1 | LIBERO | 95.9 Avg |
+| InternVLA-M1 | SimplerEnv Google VM / VA / WidowX | 80.7 / 76.0 / 71.7 |
+| InternVLA-M1 | DOMINO | SR 5.40 / MS 27.57 |
+| InternVLA-A1.5 | LIBERO | 98.9 Avg |
+| InternVLA-A1.5 | LIBERO-Plus 零样本 | 84.8 Total |
+| InternVLA-A1.5 | RoboTwin 2.0 | 93.2 Avg |
+| InternVLA-A1.5 | SimplerEnv WidowX | 80.8 |
+| InternVLA-A1.5 | DOMINO | SR 27.7 / MS 39.8 |
 
-**优势**：QFormer 作为信息瓶颈，可以在不增加 DiT 计算量的前提下融合多个编码器的特征。
-
-**使用框架**: InternVLA-M1
+InternVLA-A1.5 论文消融：去掉 video loss 后 LIBERO-Plus 84.8→78.0、RoboTwin 93.2→91.1；去掉 foresight tokens 后 LIBERO-Plus 77.9、RoboTwin 90.2、DOMINO 23.8。这比单看最终分数更直接支持“未来 latent + 瓶颈查询”的贡献。
 
 ---
 
-### 6.5 序列内动作 Token 回归（QwenOFT）
+### 6.5 序列内动作 Query + MLP/OFT 连续回归
 
-**最轻量的融合方式——在 VLM 序列中直接回归动作值。**
+#### 机制与条件化
 
-```mermaid
-graph LR
-    subgraph "VLM Input Sequence"
-        IMG["🖼️ Image Tokens"]
-        TXT["📝 Text Tokens"]
-        ACT["🔍🔍🔍🔍<br>Action Placeholders<br>×chunk_len"]
-    end
+QwenOFT 在 prompt 中放置 action placeholder。VLM 的自注意力把视觉、语言和可选 state 信息汇聚到这些位置，再用小 MLP 对每个 query 做连续动作回归：
 
-    IMG --> SA["VLM<br>Self-Attention"]
-    TXT --> SA
-    ACT --> SA
-    SA --> EXTRACT["Extract hidden at<br>🔍 positions"]
-    EXTRACT --> MLP["MLP L1 Head<br>H → D_action"]
-```
+$$\hat a_{1:H}=\operatorname{MLP}\left(h_{\text{query},1:H}^{(L)}\right),\qquad
+\mathcal{L}=\lVert \hat a-a\rVert_1$$
 
-QwenOFT 的核心思想受 OpenVLA-OFT 启发：**不需要单独的动作头**，VLM 本身就是动作预测器。通过在输入序列中注入"🔍"占位符，VLM 的自注意力机制自然地将多模态信息汇聚到这些位置。
+它没有 flow timestep、AdaLN 或迭代采样。WanOFT/CosmoPredict2OFT 则对世界模型特征做池化并展开 chunk query，和 QwenOFT 的“VLM placeholder gather”不是完全相同的输入路径。
 
-**注入方式**（[QwenOFT.py:174-179](starVLA/model/framework/VLM4A/QwenOFT.py#L174-L179)）：
+#### 使用模型
 
-```python
-action_tokens = self.action_token * self.chunk_len   # "🔍🔍🔍🔍🔍🔍🔍🔍"
-prompt_suffix = f" Please predict the next {self.chunk_len} robot actions: <action>{action_tokens}<action>."
-instructions = [instr + prompt_suffix for instr in instructions]
-```
+- 本地：QwenOFT、WanOFT、CosmoPredict2OFT。
+- 外部：OpenVLA-OFT；部分并行动作 query 回归模型也属于相邻路线。
 
-**提取方式**（[QwenOFT.py:278-330](starVLA/model/framework/VLM4A/QwenOFT.py#L278-L330)）：
+#### 代表成绩
 
-```python
-def _gather_action_token_embeddings(self, last_hidden, input_ids, action_token_id):
-    mask = input_ids == action_token_id      # [B, L]
-    # 向量化提取：取最后 chunk_len 个匹配位置
-    topk_pos = masked_pos.topk(k=self.chunk_len, dim=-1).values
-    selected_pos = topk_pos.sort(dim=-1).values  # 时间顺序排列
-    action_queries = last_hidden.gather(dim=1, index=expanded_index)  # [B, chunk_len, H]
-```
+| 模型与协议 | 成绩 | 说明 |
+|---|---:|---|
+| OpenVLA-OFT，LIBERO | 97.1 Avg | 论文 C；比原 OpenVLA 76.5 大幅提升 |
+| StarVLA-OFT Qwen3，LIBERO | 96.6 Avg | 同表本地最高；Long 93.8 |
+| StarVLA-OFT Qwen3，LIBERO-Plus | 75.0 Total | 零样本 C |
+| StarVLA-OFT，RoboTwin 50 demos | Easy 50.38 | 与官方不同数据口径时不可混排 |
+| StarVLA-OFT，RoboTwin 50+500 demos | Easy 88.18 / Hard 88.32 | 数据扩展设置 |
+| StarVLA-OFT-Qwen3，RoboCasa GR-1 Tabletop | 48.8 Avg | 本地同表第一 |
+| StarVLA-OFT，DOMINO | SR 10.86 / MS 30.49 | 本地四类动作头最高，但低于 PUMA SR 17.20 |
+| Qwen3VL-OFT Bridge+RT-1，SimplerEnv WidowX | 42.7 | 说明域内 MLP 高分不自动迁移到 real-to-sim |
 
-**优势**：
-- 参数最少（仅需小型 MLP 头）
-- 单步前向（无迭代去噪）
-- VLM 的因果注意力自然提供了时间先后关系
+#### 结论
 
-**劣势**：
-- 动作精度受限于 VLM 表示空间
-- 无法利用 flow-matching 的逐步精化
-
-**使用框架**: QwenOFT
+OpenVLA-OFT 和 StarVLA 受控表证明，简单 L1 并不是“低精度动作头”。其关键优势是单步、稳定、吞吐高；短板是缺少显式多模态动作分布和迭代纠错。在多峰动作或严重 OOD 场景，性能更依赖 VLM 表征与数据覆盖。
 
 ---
 
-### 6.6 自回归离散动作 Token（QwenFast）
+### 6.6 自回归离散动作 Token / FAST
 
-**将动作预测转化为纯语言生成问题。**
+#### 机制与条件化
 
-```mermaid
-graph TB
-    subgraph "训练"
-        A["连续动作"] --> FAST_E["FAST Encoder<br>BPE Tokenize"]
-        FAST_E --> MAP_E["Token→<robot_action_*>"]
-        MAP_E --> VLM_T["VLM Forward<br>with labels"]
-        VLM_T --> CE["Cross-Entropy Loss<br>on action tokens only"]
-    end
+FAST 对连续轨迹做频域/量化压缩与 BPE，再映射到扩展 action vocabulary。动作条件化完全发生在 VLM causal self-attention 内，LM head 使用 CE 预测下一个动作 token。
 
-    subgraph "推理"
-        VLM_G["VLM Generate<br>(autoregressive)"]
-        VLM_G --> EXTRACT["Extract Action<br>Token IDs"]
-        EXTRACT --> MAP_D["<robot_action_*>→ID"]
-        MAP_D --> FAST_D["FAST Decoder<br>ID→continuous"]
-    end
-```
+$$a_{1:H}\xrightarrow{\text{FAST}}z_{1:K},\qquad
+\mathcal{L}_{AR}=-\sum_k\log p(z_k\mid I,L,z_{<k})$$
 
-**核心设计**：FAST tokenizer 使用 BPE 将连续动作序列编码为离散 token（词表大小 2048），然后映射到 VLM 的扩展词表中。训练时，动作 token 作为 assistant response 的一部分参与标准 next-token prediction。
+优点是统一语言模型接口、训练基础设施成熟；缺点是串行解码、早期错误传播与量化误差。
 
-**Token 映射**（[QwenFast.py:265-272](starVLA/model/framework/VLM4A/QwenFast.py#L265-L272)）：
+#### 使用模型
 
-```python
-def map_fast_token_to_vlm_action(self, tokens) -> str:
-    return "".join([f"<robot_action_{token}>" for token in tokens])
-    # e.g., [42, 17, 891] → "<robot_action_42><robot_action_17><robot_action_891>"
-```
+- 本地：QwenFast。
+- 外部：π0-FAST/OpenPI FAST、OpenVLA-FAST 及相关动作 token VLA。
 
-**Label Masking**：训练时只在动作 token 位置计算损失（[QWen3.py:147-168](starVLA/model/modules/vlm/QWen3.py#L147-L168)）：
+#### 代表成绩
 
-```python
-if solutions is not None:
-    labels = batch_inputs["input_ids"].clone()
-    for i in range(labels.size(0)):
-        seq = labels[i]
-        mask_seq = (seq >= action_token_min) & (seq <= action_token_max)
-        nonzero_indices = torch.nonzero(mask_seq, as_tuple=False)
-        if nonzero_indices.numel() > 0:
-            first_action_index = nonzero_indices[0].item()
-            seq[:first_action_index] = IGNORE_INDEX  # 仅对动作 token 计算 CE loss
-```
+| 模型与协议 | 成绩 |
+|---|---:|
+| StarVLA-FAST Qwen3，LIBERO | 95.4 Avg |
+| StarVLA-FAST Qwen2.5，LIBERO-Plus | 48.9 Total |
+| StarVLA-FAST，DOMINO | SR 5.74 / MS 20.66 |
+| Qwen2.5-FAST Bridge+RT-1，SimplerEnv WidowX | 58.6 |
+| π0-FAST，LIBERO | 85.5 Avg |
+| π0-FAST，LIBERO-Plus（StarVLA引用表） | 61.6 Total |
+| π0-FAST，RoboArena 聚合快照 | 约 1581±31 Elo |
 
-**与 Flow-matching 的对比**：
-
-| 维度 | 自回归离散 | Flow-matching 连续 |
-|------|-----------|-------------------|
-| 动作空间 | 离散（2048 tokens） | 连续（ℝ^D） |
-| 损失函数 | Cross-Entropy | MSE |
-| 推理 | 序列化生成（慢） | 并行 Euler 步进 |
-| 精度 | 受 BPE 量化限制 | 理论上无损 |
-| 优势 | 复用 VLM 语言能力 | 精确连续控制 |
-
-**使用框架**: QwenFast
+RoboArena 是动态聚合和 pairwise 真机评价，不能与 LIBERO 百分比合成。FAST 的核心价值更偏训练/部署统一和压缩效率，而不是在所有 benchmark 上取得最高成功率。
 
 ---
 
-### 6.7 交错式 VLM + 动作专家（PI0/PI05）
+### 6.7 逐层共享 VLM + Action Expert（π0 系）
 
-**最复杂的融合方式——两个 Transformer 共享每一层的注意力计算。**
+#### 机制与动作条件化
+
+PI0/PI05 不是“VLM 完成后把最后层送给 DiT”。VLM prefix 与 action suffix 在每个 Gemma 层分别投影 Q/K/V，沿序列维联合 attention，再切回两条流。mask 保证动作 expert 可读 VLM，VLM 不读未来动作。
+
+PI0 将 state 和 noisy action/time 嵌入 suffix；PI05 把 state 离散进 prefix，并用 timestep 生成 adaRMS 的 scale/shift/gate。推理可缓存 prefix KV，再对 action suffix 做 Euler 积分。
 
 ```mermaid
-graph TB
-    subgraph "VLM Stream (PaliGemma)"
-        V_IN["Image + Text Tokens"]
-        V_L1["Gemma Layer 1"]
-        V_L2["Gemma Layer 2"]
-        V_LN["Gemma Layer N"]
-    end
-
-    subgraph "Action Expert Stream"
-        A_IN["Action + Timestep Tokens"]
-        A_L1["Expert Layer 1"]
-        A_L2["Expert Layer 2"]
-        A_LN["Expert Layer N"]
-    end
-
-    subgraph "Joint Attention"
-        J1["Q_vlm⊕Q_act, K_vlm⊕K_act, V_vlm⊕V_act<br>→ Joint Attention<br>→ Split Output"]
-        J2["Joint Attention Layer 2"]
-        JN["Joint Attention Layer N"]
-    end
-
-    V_L1 --> J1
-    A_L1 --> J1
-    J1 --> V_L2 & A_L2
-    V_L2 --> J2
-    A_L2 --> J2
-    J2 --> V_LN & A_LN
+sequenceDiagram
+  participant V as VLM流
+  participant J as 联合注意力
+  participant A as ActionExpert
+  V->>J: QKV视觉语言
+  A->>J: QKV状态动作时间
+  J-->>V: 仅VLM可见范围
+  J-->>A: VLM与动作上下文
+  A->>A: flow velocity
 ```
 
-PI0/PI05 的融合方式（[PI0.py](starVLA/model/framework/VLM4A/PI0.py)）源自 Physical Intelligence 的 π₀ 论文。核心是 `forward_shared_gemma_layer()`：
+#### 使用模型与演进
 
-```python
-def forward_shared_gemma_layer(vlm_layer, expert_layer, vlm_hidden, expert_hidden):
-    # 1. 分别计算 Q, K, V
-    vlm_q, vlm_k, vlm_v = vlm_layer.self_attn.project(vlm_hidden)
-    exp_q, exp_k, exp_v = expert_layer.self_attn.project(expert_hidden)
+- 本地：PI0、PI05。
+- 外部：Physical Intelligence π0、π0.5；π0.7 延续动作专家，加入丰富 context（语言、subgoal image、执行 metadata）和 Knowledge Insulation：动作 expert 可读取 VLM 表征，但连续动作梯度不反向破坏 VLM 的预训练知识。π0.7 暂无足够统一的公共模拟表，不把官方真实机器人曲线换算成榜单名次。
 
-    # 2. 拼接进行联合注意力
-    joint_q = torch.cat([vlm_q, exp_q], dim=2)   # concat along seq dim
-    joint_k = torch.cat([vlm_k, exp_k], dim=2)
-    joint_v = torch.cat([vlm_v, exp_v], dim=2)
+#### 代表成绩
 
-    # 3. 统一注意力计算
-    joint_output = attention(joint_q, joint_k, joint_v, mask=joint_mask)
+| 模型与协议 | 成绩 |
+|---|---:|
+| StarVLA/OpenPI PI05，CALVIN D→D | 3.885 平均链长 |
+| StarVLA OpenPI 复现，LIBERO | 最高约 97.30 Avg（具体 FP32 eval 配置） |
+| π0，LIBERO | 94.1 Avg |
+| π0.5，LIBERO | 约 96.9 Avg |
+| π0.5，LIBERO-PRO | Total 0.53，官方项目表快照第一 |
+| π0.5，RoboChallenge Table30 Specialist | SR 42.67 / Score 61.84 |
+| π0.5，RoboChallenge Table30 Generalist | SR 17.67 / Score 31.27 |
+| π0.5，RoboArena 聚合快照 | 约 1612±32 Elo |
 
-    # 4. 分割回各自流
-    vlm_output = joint_output[:, :vlm_len, :]
-    exp_output = joint_output[:, vlm_len:, :]
-
-    return vlm_output, exp_output
-```
-
-**PI05 的增量改进**：
-- `discrete_state_input=True`：启用离散化状态注入
-- `use_adarms=True`：在 action expert 中使用 adaRMS 归一化（3 输出：scale, shift, gate）
-
-**注意力掩码**（通过 `make_att_2d_masks` / `make_att_4d_masks` 构造）：
-- VLM token 可以看到所有 VLM token（因果 mask）
-- Action expert token 可以看到所有 VLM token + 所有 action token
-- VLM token **不能**看到 action token（单向信息流）
-
-**使用框架**: PI0, PI05
+π0.5 的强项是跨任务与长程层次控制，但分数高度依赖其预训练和后训练数据。共享专家机制无法单独解释全部收益。
 
 ---
 
-### 6.8 双编码器拼接（QwenDual）
+### 6.8 双编码器拼接与多流交互
 
-**使用 VLM + DINOv2 双编码器的特征拼接。**
+#### 本地机制
 
-```mermaid
-graph LR
-    IMG["Images"] --> VLM["Qwen-VL"] & DINO["DINOv2"]
-    VLM --> VH["VLM Hidden<br>[B, L_vlm, H_vlm]"]
-    DINO --> DH["DINO Features<br>[B, N_dino, D_dino]"]
-    DH --> PROJ["Linear Proj<br>D_dino → H_vlm"]
-    VH --> CONCAT["⊕ Concat<br>along seq dim"]
-    PROJ --> CONCAT
-    CONCAT --> DiT["Cross-Attention DiT"]
-```
+QwenDual 同时用 Qwen-VL 和 DINOv2。DINO patch 经线性投影后，与 VLM 最后一层 token 沿序列维拼接，整体作为单层 FM DiT 的 K/V。它没有 QFormer，也不是逐层双编码器。
 
-QwenDual 的核心思想：VLM 提供高级语义理解（"这是一个红色方块"），DINOv2 提供精细空间特征（"方块在图像的这个位置"）。两种特征互补。
+ABot_M0 是更复杂的相邻类型：引入 VGGT 几何表征并与 VLM 交互，最终仍由 AML/flow head 生成动作。
 
-**使用框架**: QwenDual
+#### 外部扩展：多流而非简单拼接
+
+RLDX-1 的 Multi-Stream Action Transformer 为视觉、语言、状态、动作、历史/记忆等建立专用 stream，再通过 joint/self/cross-stream interaction 融合，动作由少步 flow matching 生成。它属于 6.8 的“多源分流—交互”扩展，而不是 QwenDual 的逐 token `cat` 同构实现。
+
+#### 代表成绩
+
+| 模型 | Benchmark | 成绩 |
+|---|---|---:|
+| RLDX-1 | LIBERO | 97.8 |
+| RLDX-1 | LIBERO-Plus | 86.7 |
+| RLDX-1 | SimplerEnv Google VM / VA / WidowX | 81.5 / 77.4 / 71.9 |
+| RLDX-1 | RoboCasa Kitchen / GR-1 Tabletop | 70.6 / 58.7 |
+| RLDX-1 | RoboCasa365 论文表 / 2026-07-09榜单 | 32.1 / 36.0 |
+| ABot-M0 | LIBERO-Plus（StarVLA引用表） | 80.5 |
+| ABot-M0.5 | RoboCasa365 2026-07-09榜单 | 40.3 |
+
+本地 QwenDual 没有独立公开的受控 benchmark 表，因此不能判断 DINO 拼接本身贡献多少。RLDX-1 的成绩支持多流设计的潜力，但同时包含大规模数据与专用训练。
 
 ---
 
-### 6.9 世界模型特征提取（WM4A 家族）
+### 6.9 世界模型特征、未来 Latent 与 World-Action Model
 
-**使用视频生成模型的中间特征作为动作条件化信号。**
+#### 本地 WM4A 三种出口
+
+1. `WanGR00T/CosmoPredict2GR00T`：取世界模型最后层特征→单层 FM DiT。
+2. `WanPI/CosmoPredict2PI`：对 world-model blocks 注册 hook，逐层特征→LayerwiseFM。
+3. `WanOFT/CosmoPredict2OFT`：特征池化→MLP L1。
+
+WanGR00T 的最后层路径并非 hook；WanPI 才是逐 block hook。WanPI 有 per-layer projector，CosmoPredict2PI 可直接使用匹配维度，文档应区分。
+
+#### 2026 外部代表
+
+- DreamZero：在大规模视频扩散骨干中联合建模未来视频 latent 与动作，约 7 Hz；不是“先生成完整视频再调用独立 policy”。
+- Kairos：VideoDiT 与 ActionDiT/mixed attention 联合世界—动作建模；公开 RoboTwin 与 LIBERO-Plus 权重。
+- InternVLA-A1.5：训练期以视频/未来 latent 监督 foresight tokens，部署时无需完整生成视频。
+- WorldDreamer：世界模型路线，在 RoboCasa365 动态榜有公开提交。
 
 ```mermaid
-graph TB
-    IMG["Images"] --> VAE["WM VAE Encoder<br>(AutoencoderKLWan)"]
-    TXT["Instruction"] --> TE["Text Encoder<br>(UMT5 / T5)"]
-    VAE --> LAT["Latent<br>[B, C, T, H/8, W/8]"]
-    TE --> TC["Text Cond<br>[B, L_t, D_text]"]
-
-    LAT & TC --> WM_DiT["WM DiT Forward<br>(WanTransformer3D)<br>with hook"]
-    WM_DiT --> FEAT["Intermediate Features<br>[B, L_wm, D_wm]"]
-    FEAT --> PROJ["wm_projector<br>Linear(D_wm, D_action)"]
-    PROJ --> A_DiT["Action DiT<br>cross-attention"]
+flowchart LR
+  obs[当前观测与语言] --> wm[世界或视频模型]
+  wm --> futureLatent[未来相关Latent]
+  futureLatent --> actionExpert[ActionDiT或FlowExpert]
+  actionExpert --> action[动作Chunk]
+  actionExpert -.-> jointFuture[可选联合未来预测]
 ```
 
-实现路径（[WanGR00T.py](starVLA/model/framework/WM4A/WanGR00T.py)）：
+#### 代表成绩
 
-```python
-# Wan2.2 世界模型的中间特征 → 动作头
-wm_features = self.wm_interface.extract_features(images, instruction)  # hook-based
-projected = self.wm_projector(wm_features)  # Linear(3072, cross_attn_dim)
-action_loss = self.action_model(projected, actions, state)
-```
+| 模型与协议 | 成绩 | 证据边界 |
+|---|---:|---|
+| DreamZero，RoboArena | 约 1737±43 Elo | 动态聚合；截至快照领先，不是模拟 SR |
+| Kairos，LIBERO-Plus | 89.0 Total | 官方模型/项目 C；部分文稿提到联合设置 90.8，需按版本区分 |
+| Kairos，RoboTwin 2.0 | Clean 96.9 / Randomized 95.2 / Avg 96.1 | 官方项目 C |
+| Kairos，WorldModelBench Robot | 9.30 | 世界模型指标，不与动作 SR 混排 |
+| InternVLA-A1.5 | LIBERO-Plus 84.8；DOMINO SR 27.7 | 视频 loss/foresight 有明确消融 |
+| WorldDreamer，RoboCasa365 | Overall 35.3 | 2026-07-09官方提交榜 B |
 
-**核心假设**：经过大规模视频预测训练的世界模型已经学会了物理世界的因果关系和动力学规律。其中间特征编码了"接下来会发生什么"的预测信息，这对动作预测是极有价值的。
-
-**使用框架**: WanGR00T, WanPI, WanOFT, CosmoPredict2GR00T, CosmoPredict2PI, CosmoPredict2OFT
+世界模型路线在扰动鲁棒性和动态任务上显示优势，但计算、训练数据和闭环延迟更高。最有价值的证据不是“会生成漂亮视频”，而是未来表征消融是否改善动作成功率。
 
 ---
 
 ### 6.10 离散化状态文本注入
 
-本质上是一种**状态→文本**的模态转换，已在第 4.2 节详细分析。在融合层面，它将本体感知状态从"外部数值信号"转化为"VLM 可理解的文本 token"，从而实现状态信息与视觉/语言信息在 VLM 内部的**原生融合**。
+#### 机制
 
+将归一化 proprioception 分到 256 bins，转成数字 token 并附加到指令：
+
+```text
+pick up the red cube [STATE] 95 133 203 44 127 88 201 [ACTION]
 ```
-"pick up the red cube [STATE] 95 133 203 44 127 88 201 [ACTION]"
-```
 
-这种做法消除了对额外状态编码器的需求，但引入了约 0.4% 的量化误差和 $D_s + 2$ 个额外文本 token 的序列长度开销。
+这让 state 在 VLM 内与图像、语言共同融合，并可移除动作头外部 `state_encoder`。量化步长约为 $2/256=0.0078125$；误差上界与归一化、边界 clipping 方式相关，不能笼统写成固定“0.4% 精度损失”。
 
-**使用框架**: QwenPI_v3, QwenOFT（可选）, PI05
+#### 使用模型
+
+- 本地：QwenPI_v3、QwenOFT（可选）、WanOFT/CosmoPredict2OFT、PI05。
+- 外部：π0.5 及一些沿用其 state-as-token 思想的模型。
+
+#### Benchmark 证据与限制
+
+QwenPI_v3 的 SimplerEnv WidowX 69.8、PI05 的 CALVIN D→D 3.885 都使用或对齐该思想；但这些实验同时改变动作专家、backbone 或训练配置。当前仓库没有“仅打开 state 文本化、其他完全不变”的公开消融，因此不能宣称这些增益由状态文本化单独产生。
+
+适用场景是多 embodiment 统一接口、希望 VLM 直接理解 state 与语言关系；不适合状态极高维、精度要求高或 tokenizer 对数字表示效率很差的场景。
 
 ---
 
-### 6.11 LangForce 双分支贝叶斯分解
+### 6.11 LangForce 双分支贝叶斯 / PMI 语言约束
 
-**最理论驱动的融合方式——基于贝叶斯后验分解的双分支架构。**
+#### 源码核验后的机制
 
-LangForce（[LangForce.py](starVLA/model/framework/VLM4A/LangForce.py)）将动作条件分布分解为先验和后验：
+本地 LangForce 并非两个独立 VLM。它复用同一 `qwen_vl_interface` 做两次前向，通过 latent action queries 与语言 token 的顺序构造 prior/posterior 表征，再以 PMI/LLR、hard-token/gate 与 FM action loss联合优化。
 
-$$p(a|V, L) = \underbrace{p(a|V, A, L)}_{\text{后验分支}} \cdot \frac{p(a|V, L)}{p(a|V, A, L)} \quad \text{(不精确，仅用于说明分解思想)}$$
+需修正旧文档的两点：
 
-实际实现中：
-- **Prior 分支** (V+A+L)：视觉 + 动作 + 语言 → 预测动作分布
-- **Posterior 分支** (V+L+A)：视觉 + 语言 + 动作 → 精化动作分布
-- **LLR 正则化**：Log-Likelihood Ratio 约束先验和后验的一致性
-- **Hard-token/Gate 机制**：在推理时仅使用先验分支（因为没有未来动作标签）
+1. 不是伪代码中的 `self.prior_branch` 与 `self.posterior_branch` 两套网络；
+2. 当前本地 `predict_action()` 注释与实现使用 **posterior token order**，不能写成“推理只用 prior”。
 
-```python
-# LangForce.py 核心
-class LangForce(baseframework):
-    def forward(self, examples):
-        # Prior branch: 编码 V+A+L
-        prior_output = self.prior_branch(images, actions, instructions)
-        # Posterior branch: 编码 V+L+A（顺序不同）
-        posterior_output = self.posterior_branch(images, instructions, actions)
-        # LLR loss: 约束先验 ≈ 后验
-        llr_loss = compute_llr(prior_output, posterior_output)
-        # 动作 loss
-        action_loss = self.action_head(prior_output)
-        return {"action_loss": action_loss + λ * llr_loss}
-```
+#### 动作头条件化
 
-**使用框架**: LangForce
+从 latent action query 位置提取 hidden，作为 `FlowmatchingActionHead` 的 context；动作侧仍使用 noisy action、state MLP、future tokens 和 timestep AdaLN。LangForce 的创新主要在“迫使动作依赖语言”，而不是新的数值动作解码器。
+
+#### 代表成绩
+
+| Benchmark | QwenGR00T baseline | LangForce | 增益 |
+|---|---:|---:|---:|
+| LIBERO Avg | 96.5 | 98.4 | +1.9 |
+| LIBERO Goal | 97.4 | 99.4 | +2.0 |
+| SimplerEnv Avg | 55.2 | 66.5 | +11.3 |
+| RoboCasa Avg | 47.8 | 52.6 | +4.8 |
+
+LIBERO 四 suite 为 Spatial/Object/Goal/Long=99.2/99.6/99.4/95.2。以上来自 LangForce 论文/官方模型卡 C。其 vision-only 消融在 Goal 上显著下降，直接支持“语言歧义场景需要抑制视觉捷径”的论点，比单纯平均分更有解释力。
 
 ---
 
-### 6.12 VLA-Adapter 门控多源注意力
+### 6.12 VLA-Adapter：Query 注入与门控多源注意力
 
-**通过可学习的 action query tokens 和 forward hook 实现轻量级 VLA 适配。**
+#### 正确的本地机制
 
-QwenAdapter（[QwenAdapter.py](starVLA/model/framework/VLM4A/QwenAdapter.py)）的设计思路：
+QwenAdapter 在文本中放置 placeholder，并在 `get_input_embeddings()` 上注册 forward hook，把相应位置的 embedding 替换为可学习 `action_query`。它不是在任意 VLM 中间层直接注入 query。
 
-1. 定义可学习的 `action_query` tokens
-2. 通过 forward hook 将这些 tokens 注入到 VLM 的中间层
-3. 提取 VLM 在 vision + query 位置的多层特征
-4. 送入 VLA-Adapter 动作头
+VLM forward 后，从多层 hidden 中提取 vision patch 与 action query 表征；`VLA_Adapter_L1RegressionActionHead` 通过多层 gated self/task/adapter attention 融合。state 由 `ProprioProjector` 作为额外 K/V；最终 L1 回归动作，没有 flow timestep。
 
-```python
-# QwenAdapter.py 核心
-class QwenAdapter(baseframework):
-    def __init__(self, config):
-        self.proprio_projector = ProprioProjector(state_dim, hidden, llm_hidden)
-        self.action_query = nn.Embedding(num_queries, llm_hidden)
-
-        # Forward hook: 在指定层注入 action_query
-        self.qwen_vl_interface.model.register_forward_hook(self._inject_queries)
-
-    def forward(self, examples):
-        # VLM forward with injected queries
-        outputs = self.qwen_vl_interface(**inputs)
-        # Extract features at vision + query positions from multiple layers
-        multi_layer_features = extract_features(outputs.hidden_states)
-        # VLA-Adapter head
-        actions = self.adapter_head(multi_layer_features)
+```mermaid
+flowchart LR
+  placeholder[文本Placeholder] --> embedHook[Embedding层Hook]
+  learnedQuery[可学习ActionQuery] --> embedHook
+  embedHook --> vlm[VLM多层前向]
+  vlm --> extracted[视觉与Query多层特征]
+  state[Proprioception] --> proprio[ProprioProjector]
+  extracted --> gatedAdapter[门控多源Adapter]
+  proprio --> gatedAdapter
+  gatedAdapter --> l1Action[L1动作Chunk]
 ```
 
-**使用框架**: QwenAdapter
+#### 使用模型与成绩
+
+- 本地：QwenAdapter。
+- DOMINO clean dynamic α=0.1：SR 4.40 / MS 24.31。
+- 当前仓库没有 LIBERO/SimplerEnv 的完整同设置 QwenAdapter 表，也没有门控层数、query 注入、proprio projector 的公开逐项消融。
+
+其优势是冻结大部分 VLM 时参数效率高、可读取多层视觉信息；缺点是多层特征缓存与 Adapter 结构复杂，现有公开成绩不足以证明它优于 OFT 或 FM 主线。
 
 ---
 
-### 6.13 融合机制总结对比
+### 6.13 机制级横向比较
 
-| # | 机制 | 模态交互位置 | 额外参数 | 推理开销 | 信息利用深度 | 框架数量 |
-|---|------|-------------|----------|----------|------------|----------|
-| 6.1 | Token 拼接 | VLM 内部 | 0 | 低 | 全层 | 所有 Qwen |
-| 6.2 | 单层→DiT | VLM→DiT | DiT params | 中 | 最后 1 层 | 9 |
-| 6.3 | 逐层→DiT | VLM→DiT | DiT + proj | 中 | 所有 N 层 | 6 |
-| 6.4 | QFormer 聚合 | DINO+VLM→DiT | QFormer + DiT | 中 | 所有 N 层 | 1 |
-| 6.5 | 序列内回归 | VLM 内部 | 小 MLP | 低 | 最后 1 层 | 1 |
-| 6.6 | 自回归 token | VLM 内部 | 0（共享参数） | 高 | 全层 | 1 |
-| 6.7 | 交错专家 | 联合注意力 | Expert params | 高 | 逐层对齐 | 2 |
-| 6.8 | 双编码器 | 拼接 | DINO + proj | 中 | 最后 1 层 | 1 |
-| 6.9 | 世界模型 | WM→DiT | WM + proj | 高 | WM 中间层 | 6 |
-| 6.10 | 状态文本注入 | VLM 内部 | 0 | 低 | 全层 | 3 |
-| 6.11 | 双分支分解 | 分离推理 | 2× 分支 | 高 | 全层 | 1 |
-| 6.12 | Adapter 注入 | VLM hook | Adapter + queries | 中 | 多层 | 1 |
+| 机制 | 条件进入动作的方式 | 连续/离散 | 典型 NFE | 优势 | 主要风险 | 代表模型 |
+|---|---|---|---:|---|---|---|
+| 6.2 单层 Cross-DiT | 最后/选定 hidden 作 K/V | 连续 FM | 4–10 | 清晰、成熟、易扩展 | 单层信息瓶颈 | GR00T、Qwen-RobotManip |
+| 6.3 逐层 Cross-DiT | 多层 hidden 分层作 K/V | 连续 FM/离散 DD | 4–12 | 多层语义、细粒度控制 | 层路由和显存复杂 | QwenPI_v3、QwenDD |
+| 6.4 Latent/QFormer | 定长查询压缩 context | DDPM/FM | 多步 | 固定通信量、可引入 foresight | 瓶颈可能丢信息 | M1、InternVLA-A1.5 |
+| 6.5 OFT/MLP | action query hidden→MLP | 连续回归 | 1 | 最快、稳定、参数少 | 多峰表达弱 | OpenVLA-OFT、QwenOFT |
+| 6.6 FAST | VLM causal 生成动作 token | 离散 AR | token 数 | 统一 LM 接口、训练高效 | 串行与量化误差 | π0-FAST、QwenFast |
+| 6.7 共享专家 | VLM/action 每层联合 attention | 连续 FM | 4–10 | 逐层深耦合、prefix cache | 参数和实现复杂 | π0.5、π0.7 |
+| 6.8 多编码器/多流 | token concat 或 cross-stream | 多为 FM | 4–10 | 空间、记忆、触觉互补 | 数据与同步成本高 | QwenDual、RLDX-1 |
+| 6.9 世界动作模型 | 未来 latent 与 ActionDiT 交互 | 联合生成/FM | 较高 | 动态、鲁棒、长程潜力 | 延迟、训练成本、评测不成熟 | Kairos、DreamZero |
+| 6.11 双分支语言约束 | latent query+PMI/LLR→FM | 连续 FM | 推理近 FM | 抑制视觉捷径 | 双前向训练成本 | LangForce |
+| 6.12 Adapter | 多层 hidden 门控→L1 | 连续回归 | 1 | 参数高效、多源可插拔 | 证据仍少 | QwenAdapter |
+
+6.1 与 6.10 是正交输入机制，未在表中作为独立动作解码器排序。
+
+---
+
+### 6.14 按 Benchmark 的模型总对比
+
+#### 6.14.1 LIBERO：域内已接近饱和
+
+在 StarVLA 同一 Qwen3-VL、30K steps、四 suite 单策略表中：
+
+| 动作路线 | Spatial | Object | Goal | Long | Avg |
+|---|---:|---:|---:|---:|---:|
+| FAST | 97.3 | 97.4 | 96.3 | 90.6 | 95.4 |
+| OFT | 97.8 | 98.6 | 96.2 | 93.8 | 96.6 |
+| 逐层 π | 98.8 | 99.6 | 95.8 | 88.4 | 95.7 |
+| 单层 GR00T | 97.8 | 98.8 | 97.4 | 92.0 | 96.5 |
+| LangForce | 99.2 | 99.6 | 99.4 | 95.2 | 98.4 |
+
+结论：OFT 在无迭代动作头下仍达到 96.6；逐层 π 在 Spatial/Object 最高但 Long 较弱；LangForce 对 Goal 的提升最能体现语言条件化价值。LIBERO 平均分已不足以单独区分通用能力，应配合 LIBERO-Plus/PRO。
+
+外部 2026 作者表中 Qwen-RobotManip-Context 99.2、InternVLA-A1.5 98.9、RLDX-1 97.8 都很高，但训练数据、checkpoint 与评测实现不完全一致，不组成官方统一 Top 3。
+
+#### 6.14.2 LIBERO-Plus：更能区分鲁棒融合
+
+| 模型 | 机制侧重点 | Total |
+|---|---|---:|
+| Qwen-RobotManip-Context | 大规模对齐 + continuous action expert | 91.4 |
+| Kairos | 世界—动作联合建模 | 89.0 |
+| RLDX-1 | 多流交互 + FM | 86.7 |
+| InternVLA-A1.5 | foresight latent + FM | 84.8 |
+| ABot-M0 | VLM+几何表征 | 80.5 |
+| StarVLA-π Qwen3 | 逐层 Cross-DiT | 77.0 |
+| StarVLA-OFT Qwen3 | Action query + MLP | 75.0 |
+
+这些大多是作者运行的 C 级结果；官方 LIBERO-Plus 统一复测表截至当前的已合入项目可能不同。趋势上，数据对齐、多流/未来表征比单纯换解码头更有帮助。
+
+#### 6.14.3 SimplerEnv：必须分机器人和渲染协议
+
+- StarVLA Bridge+RT-1 WidowX：PI_v3 69.8 > GR00T 65.3 > FAST 58.6 > OFT 42.7。
+- RLDX-1 论文：Google VM/VA/WidowX=81.5/77.4/71.9。
+- InternVLA-A1.5：WidowX 80.8。
+- Discrete Diffusion VLA：Fractal VM 71.2、Overall 64.1；Bridge Overall 54.2。
+
+以上不能合成一个 SimplerEnv 总榜。Bridge/WidowX 的受控结果更支持 flow/逐层头处理连续轨迹；Google Robot 数据则反映不同 embodiment 和训练源。
+
+#### 6.14.4 CALVIN：长时程链必须按 split
+
+StarVLA D→D 同表：PI0.5 3.885 > GR00T Qwen2.5-Action 3.786 > QwenPI Qwen2.5-Action 3.576。ABC→D 官方榜中的 FLOWER 4.53、UniVLA 4.41 等不能与这些 D→D 数字直接比较。这里没有证据证明逐层 Cross-DiT 优于单层或共享专家；PI0.5 的层次/state 设计更适合链式任务，但数据与训练实现也不同。
+
+#### 6.14.5 RoboTwin、RoboCasa 与动态任务
+
+| Benchmark/协议 | 代表结果 | 观察 |
+|---|---|---|
+| RoboTwin 作者自报全任务聚合 | Kairos 96.1；InternVLA-A1.5 93.2；StarVLA-OFT 50+500 demos 约88.3 | checkpoint、训练 demonstrations 与聚合方式不同，只能作趋势参考 |
+| RoboCasa GR-1 Tabletop | RLDX-1 58.7；StarVLA-OFT 48.8；GR00T 47.8；π 43.9 | 多流设计和数据规模优势明显 |
+| RoboCasa365 2026-07-09榜 | Xiaomi-Robotics-1 57.4；ABot-M0.6 46.6；ABot-M0.5 40.3；RLDX-1 36.0；WorldDreamer 35.3 | 官方提交榜 B；长程 composite-unseen 仍远未解决 |
+| DOMINO α=0.1 | InternVLA-A1.5 SR 27.7；PUMA 17.2；StarVLA-OFT 10.86 | 未来 latent/动态训练比静态 LIBERO 分数更有区分度 |
+
+#### 6.14.6 真机 leaderboard 与竞赛
+
+- RoboChallenge 必须区分 Table30 v1/v2、Specialist/Generalist。Qwen-RobotManip 在 v1 generalist 报 SR 45.0/Score 59.83；π0.5 的不同赛道成绩不能直接与之混排。
+- RoboArena 使用 pairwise Bradley–Terry/Elo，DreamZero、π0.5、π0-FAST 的 Elo 反映真机偏好，不是绝对任务成功率。
+- ManipArena、BEHAVIOR Challenge 等比赛应按赛季和赛道引用，不能用静态论文“Rank 1”覆盖后续动态榜。
+
+---
+
+### 6.15 消融结论、设计选择与研究空白
+
+#### 已有证据较强的结论
+
+1. **轻量动作头并不天然弱**：OpenVLA-OFT 97.1、StarVLA-OFT 96.6 表明 parallel query + L1 在域内任务上非常强。
+2. **语言约束应在有歧义的任务上评估**：LangForce 在 LIBERO Goal 与 OOD SimplerEnv/RoboCasa 的提升，比在饱和 Spatial/Object 上更有意义。
+3. **未来 latent 对 OOD/动态任务有效**：InternVLA-A1.5 去除 video loss 或 foresight tokens 后，LIBERO-Plus、RoboTwin、DOMINO 均下降。
+4. **逐层路由的收益依赖实现**：`interleave` 是否跳过奇数 VLM 层、是否有 per-layer projector，会改变“逐层融合”的实际含义。
+5. **动作离散化不必等于纯 AR**：Discrete Diffusion VLA 通过并行恢复和 re-mask，在 LIBERO 接近连续 OFT，并改善 OOD 语言扰动。
+
+#### 仍不能从现有表格推出的结论
+
+1. 不能仅凭 PI_v3 69.8 vs GR00T 65.3 证明逐层 hidden 必然更优，因为还有 state、投影、checkpoint 和路由配置差异。
+2. 不能用 Kairos/DreamZero 的世界模型得分证明视频生成质量必然转化为闭环控制；需要 action-only、joint world-action 与等算力消融。
+3. 不能把 LIBERO 98–99% 当作真实机器人 generalist 能力；RoboCasa365 composite-unseen、RoboChallenge 和动态任务更有区分度。
+4. 不能把不同赛道的 Elo、SR、process score 与平均链长归一成一个“总冠军”。
+
+#### 按目标选择机制
+
+| 目标 | 优先路线 | 理由 |
+|---|---|---|
+| 低延迟、易训练、域内精调 | OFT/MLP | 1 NFE，LIBERO/RoboCasa Tabletop 已有强结果 |
+| 连续多峰动作、短 chunk 精细控制 | 单层或逐层 Flow-DiT | 连续速度场、并行 chunk、可做 RTC |
+| 统一离散接口且希望并行纠错 | Discrete Diffusion | 比 AR 更并行，可 re-mask |
+| 多 embodiment、复杂传感器 | 多流 Transformer | 模态专用 stream，扩展 state/tactile/history |
+| 动态、扰动和长时程 | Foresight / World-Action Model | 显式未来表征，已有 OOD 消融支持 |
+| 指令歧义与组合泛化 | LangForce/语言约束 + 强动作头 | 抑制视觉捷径 |
+| 参数高效适配冻结 VLM | Adapter 或 OFT | 小头、单步、训练成本低 |
+
+---
+
+### 6.16 主要来源
+
+#### 本地代码与结果
+
+- [QwenGR00T.py](../../starVLA/model/framework/VLM4A/QwenGR00T.py)
+- [QwenPI.py](../../starVLA/model/framework/VLM4A/QwenPI.py)
+- [QwenPI_v3.py](../../starVLA/model/framework/VLM4A/QwenPI_v3.py)
+- [LayerwiseFM_ActionHeader.py](../../starVLA/model/modules/action_model/LayerwiseFM_ActionHeader.py)
+- [cross_attention_dit.py](../../starVLA/model/modules/action_model/flow_matching_head/cross_attention_dit.py)
+- [PI0.py](../../starVLA/model/framework/VLM4A/PI0.py)
+- [M1.py](../../starVLA/model/framework/VLM4A/M1.py)
+- [LangForce.py](../../starVLA/model/framework/VLM4A/LangForce.py)
+- [QwenAdapter.py](../../starVLA/model/framework/VLM4A/QwenAdapter.py)
+- [Model Zoo](../../docs/model_zoo.md)
+- [LIBERO 结果](../../examples/simBenchmarks/LIBERO/README.md)
+- [CALVIN 结果](../../examples/simBenchmarks/calvin/README.md)
+- [RoboTwin 结果](../../examples/simBenchmarks/Robotwin/README.md)
+- [DOMINO 结果](../../examples/simBenchmarks/DOMINO/README.md)
+- [2026 Benchmark 与赛事汇总](../l/bnchmrk_ls.md)
+
+#### 外部论文、项目与榜单
+
+- [OpenVLA-OFT](https://arxiv.org/abs/2502.19645)
+- [π0.5](https://www.pi.website/blog/pi05) 与 [openpi](https://github.com/Physical-Intelligence/openpi)
+- [π0.7](https://arxiv.org/abs/2604.15483)
+- [GR00T N1](https://arxiv.org/abs/2503.14734) 与 [Isaac-GR00T](https://github.com/NVIDIA/Isaac-GR00T)
+- [LangForce](https://arxiv.org/abs/2601.15197)
+- [Qwen-RobotManip](https://arxiv.org/abs/2606.17846)
+- [DM0](https://arxiv.org/abs/2602.14974)
+- [RLDX-1](https://arxiv.org/abs/2605.03269)
+- [InternVLA-A1.5](https://arxiv.org/abs/2607.04988)
+- [Discrete Diffusion VLA](https://arxiv.org/abs/2508.20072)
+- [Kairos](https://arxiv.org/abs/2606.16533)
+- [DreamZero](https://arxiv.org/abs/2602.15922)
+- [RoboCasa365 Leaderboard](https://robocasa.ai/leaderboard.html)
+- [RoboTwin Leaderboard](https://robotwin-platform.github.io/leaderboard)
+- [RoboChallenge](https://robochallenge.ai/leaderboard)
+- [VLA Evaluation Harness](https://allenai.github.io/vla-evaluation-harness/leaderboard/)
 
 ---
 
@@ -1386,7 +1447,7 @@ class QwenAdapter(baseframework):
 
 ### 7.1 AdaLayerNorm
 
-**starVLA 主力条件化机制，被 14 个框架使用。**
+**starVLA 的主力连续动作条件化机制。** 它被 GR00T、LayerwiseFM、LayerwiseDiscreteDiffusion 及其 VLM/WM 变体复用；具体框架数会随 registry 扩展变化，因此不使用容易过时的固定计数。
 
 数学表达：
 
@@ -1395,7 +1456,7 @@ $$(s, d) = \text{Linear}(\text{SiLU}(t_{\text{emb}}))$$
 
 其中 $t_{\text{emb}}$ 是通过 `TimestepEncoder` 生成的时间步嵌入。
 
-实现（[cross_attention_dit.py:45-68](starVLA/model/modules/action_model/flow_matching_head/cross_attention_dit.py#L45-L68)）：
+实现（[cross_attention_dit.py:45-68](../../starVLA/model/modules/action_model/flow_matching_head/cross_attention_dit.py#L45-L68)）：
 
 ```python
 class AdaLayerNorm(nn.Module):
@@ -1482,7 +1543,7 @@ $$\tilde{v} = v_\text{uncond} + w \cdot (v_\text{cond} - v_\text{uncond})$$
 | 机制 | 归一化函数 | 输出数 | 门控 | 初始化 | 条件来源 | 状态 |
 |------|-----------|--------|------|--------|----------|------|
 | AdaLayerNorm | LayerNorm | 2 (s,d) | 无 | 默认 | timestep | **主力** |
-| adaRMS | RMSNorm | 3 (s,d,g) | 门控残差 | Zero-init | timestep | PI0/PI05 |
+| adaRMS | RMSNorm | 3 (s,d,g) | 门控残差 | Zero-init | timestep | PI05 |
 | FiLM | Identity | 2 (γ,β) | 无 | 默认 | state | 遗留未用 |
 | CFG | — | — | — | — | 标签 dropout | 基础设施就绪 |
 
@@ -1510,43 +1571,37 @@ sequenceDiagram
 
     D->>F: examples: List[dict]<br>images=[B,V,PIL], lang=[B,str],<br>action=[B,T,D_a], state=[B,1,D_s]
 
-    rect rgb(220, 235, 255)
-        Note over F,VLM: Phase 1: VLM Encoding (bf16)
-        F->>VLM: build_qwenvl_inputs(images, instructions)
-        VLM-->>F: input_ids[B,L], pixel_values, attention_mask
-        F->>VLM: forward(output_hidden_states=True)
-        VLM-->>F: hidden_states[-1] → [B, L, H]<br>H=2048 (Qwen3-4B)
-    end
+    Note over F,VLM: Phase 1: VLM Encoding (bf16)
+    F->>VLM: build_qwenvl_inputs(images, instructions)
+    VLM-->>F: input_ids[B,L], pixel_values, attention_mask
+    F->>VLM: forward(output_hidden_states=True)
+    VLM-->>F: hidden_states[-1] → [B, L, H]<br>H由实际backbone config读取
 
-    rect rgb(220, 255, 220)
-        Note over F,AH: Phase 2: Action Head (fp32)
-        F->>F: repeat ×repeated_diffusion_steps (e.g., 8)<br>last_hidden: [8B, L, H]<br>actions_target: [8B, T_chunk, D_a]
-        F->>AH: forward(last_hidden_rep, actions_rep, state_rep)
-    end
+    Note over F,AH: Phase 2: Action Head (fp32)
+    F->>F: repeat ×repeated_diffusion_steps (e.g., 8)<br>last_hidden: [8B, L, H]<br>actions_target: [8B, T_chunk, D_a]
+    F->>AH: forward(last_hidden_rep, actions_rep, state_rep)
 
-    rect rgb(255, 235, 220)
-        Note over AH,DiT: Phase 3: Flow-matching (fp32)
-        AH->>AH: noise = randn([8B, T, D_a])<br>t ~ Beta(1.5, 1.0), clamp ≤ 0.999<br>noisy_traj = (1-t)·noise + t·actions<br>velocity = actions - noise
-        AH->>AH: ActionEncoder(noisy_traj, t_disc) → [8B, T, D_dit]
-        AH->>AH: state_encoder(state) → [8B, 1, D_dit]
-        AH->>AH: future_tokens → [8B, N_f, D_dit]
-        AH->>AH: cat(state, future, action) → [8B, 1+N_f+T, D_dit]
-        AH->>DiT: forward(sa_embs, encoder_hs=last_hidden_rep, t=t_disc)
-        DiT-->>AH: output → [8B, 1+N_f+T, D_out]
-        AH->>AH: action_decoder(output[:, -T:]) → [8B, T, D_a]<br>loss = MSE(pred_velocity, target_velocity)
-    end
+    Note over AH,DiT: Phase 3: Flow-matching (fp32)
+    AH->>AH: noise = randn([8B, T, D_a])<br>t ~ Beta(1.5, 1.0), clamp ≤ 0.999<br>noisy_traj = (1-t)·noise + t·actions<br>velocity = actions - noise
+    AH->>AH: ActionEncoder(noisy_traj, t_disc) → [8B, T, D_dit]
+    AH->>AH: state_encoder(state) → [8B, 1, D_dit]
+    AH->>AH: future_tokens → [8B, N_f, D_dit]
+    AH->>AH: cat(state, future, action) → [8B, 1+N_f+T, D_dit]
+    AH->>DiT: forward(sa_embs, encoder_hs=last_hidden_rep, t=t_disc)
+    DiT-->>AH: output → [8B, 1+N_f+T, D_out]
+    AH->>AH: action_decoder(output[:, -T:]) → [8B, T, D_a]<br>loss = MSE(pred_velocity, target_velocity)
 
     F-->>D: {"action_loss": loss}
 ```
 
-**关键维度传播**（以 Qwen3-VL-4B + DiT-B 为例）：
+**关键维度传播**（以公开 Qwen3-VL-4B checkpoint 的 `H=2560` + DiT-B 为例；代码运行时以实际 config 为准）：
 
 | 阶段 | 张量 | 形状 | 精度 |
 |------|------|------|------|
 | VLM 输入 | pixel_values | `[B, 3, H, W]` (变长) | bf16 |
 | VLM 输入 | input_ids | `[B, L]` (~200-500 tokens) | int64 |
-| VLM 输出 | hidden_states[-1] | `[B, L, 2048]` | bf16 |
-| 重复后 | last_hidden_rep | `[8B, L, 2048]` | bf16→fp32 |
+| VLM 输出 | hidden_states[-1] | `[B, L, 2560]` | bf16 |
+| 重复后 | last_hidden_rep | `[8B, L, 2560]` | bf16→fp32 |
 | ActionEncoder 输出 | action_features | `[8B, T, 768]` | fp32 |
 | State Encoder 输出 | state_features | `[8B, 1, 768]` | fp32 |
 | DiT 输入 (sa_embs) | hidden_states | `[8B, 1+32+T, 768]` | fp32 |
@@ -1568,25 +1623,25 @@ sequenceDiagram
     Note over F: state = None (已编码到文本)
 
     F->>VLM: build_qwenvl_inputs + forward(output_hidden_states=True)
-    VLM-->>F: hidden_states[-36:] → List of 36 tensors [B, L, 2048]
+    VLM-->>F: hidden_states[-36:] → List of 36 tensors [B, L, 2560]
 
     F->>PL: _project_vl_hidden_for_action(vl_embs_list)
-    Note over PL: 每层: LayerNorm(2048) + Linear(2048→1024)
+    Note over PL: 每层: LayerNorm(2560) + Linear(2560到1024)
     PL-->>F: projected: List of 36 tensors [B, L, 1024]
 
     F->>F: repeat ×repeated_diffusion_steps
 
     F->>AH: forward(projected_list, actions, state=None)
-    Note over AH: Layer-wise DiT: block[i] 的<br>cross-attn 使用 projected[i]
+    Note over AH: N个DiT block；按block idx路由<br>interleave=false时全部cross-attn
     AH-->>F: action_loss (MSE velocity)
 ```
 
 **与 QwenGR00T 的关键差异**：
 
 1. **状态编码路径不同**：状态通过离散化注入文本，在 VLM 内部处理（而非外部 MLP）
-2. **VLM 特征利用深度不同**：使用所有 36 层 hidden states（而非仅最后 1 层）
-3. **投影层**：每层有独立的 `LayerNorm + Linear`（2048→1024），将 VLM 维度压缩
-4. **DiT 层数**：= VLM 层数 × 2（因为每个 VLM 层对应一个 cross-attn block + 一个 self-attn block）
+2. **VLM 特征利用深度不同**：保留 36 层 hidden states；发布的 Bridge-RT-1 checkpoint 设置 `interleave_self_attention=false`，因此 36 层均进入对应 cross-attn。若使用代码默认 `interleave=true`，奇数 block 为 self-attn，奇数下标 VLM hidden 不参与 cross-attn
+3. **投影层**：每层有独立的 `LayerNorm + Linear`（公开 checkpoint 为 2560→1024），将 VLM 维度压缩；其他 backbone 以运行时 hidden size 为准
+4. **DiT 层数**：`num_dit_blocks = num_vl_layers = 36`，不是 72；是否交错 self-attn 由同一组 36 个 block 内的 `interleave_self_attention` 决定
 
 ### 8.3 QwenFast：自回归离散 Token
 
@@ -1658,7 +1713,7 @@ starVLA 使用 `freeze_backbones()` 和 `build_param_lr_groups()` 两个函数�
 
 #### freeze_backbones()
 
-通过 YAML 配置字段 `trainer.freeze_modules` 指定需要冻结的模块路径（[trainer_tools.py:192-234](starVLA/training/trainer_utils/trainer_tools.py#L192-L234)）：
+通过 YAML 配置字段 `trainer.freeze_modules` 指定需要冻结的模块路径（[trainer_tools.py:192-234](../../starVLA/training/trainer_utils/trainer_tools.py#L192-L234)）：
 
 ```yaml
 # 典型配置：冻结 VLM，只训练动作头和投影层
@@ -1680,7 +1735,7 @@ def freeze_backbones(model, freeze_modules=""):
 
 #### build_param_lr_groups()
 
-支持不同模块使用不同学习率（[trainer_tools.py:92-148](starVLA/training/trainer_utils/trainer_tools.py#L92-L148)）：
+支持不同模块使用不同学习率（[trainer_tools.py:92-148](../../starVLA/training/trainer_utils/trainer_tools.py#L92-L148)）：
 
 ```yaml
 # 典型配置：VLM 低学习率微调，动作头高学习率训练
@@ -1723,8 +1778,6 @@ graph TB
 
     DiT -->|"cross-attn<br>∂L/∂K, ∂L/∂V"| VLM["Qwen-VL<br>🔒/✅ 取决于配置"]
 
-    style VLM fill:#f9e79f
-    style LOSS fill:#fadbd8
 ```
 
 **两种典型训练策略**：
@@ -1748,12 +1801,11 @@ graph TB
     DiT --> AE["ActionEncoder<br>✅ 可训练"]
 
     DiT -->|"逐层 cross-attn"| PL["project_layers[0..N-1]<br>LayerNorm + Linear<br>✅ 可训练"]
-    PL -->|"∂L/∂h_i for each layer i"| VLM["Qwen-VL<br>每层都有梯度路径<br>🔒/✅"]
+    PL -->|"按实际cross block路由梯度"| VLM["Qwen-VL<br>参与路由的层有梯度路径<br>🔒/✅"]
 
-    style PL fill:#d5f5e3
 ```
 
-**投影层的梯度作用**：每个 `project_layers[i]` 的梯度信号会独立传递到 VLM 的第 $i$ 层。这意味着 VLM 的每一层都接收到与其抽象级别相匹配的动作预测梯度——底层接收空间特征相关的梯度，顶层接收语义理解相关的梯度。
+**投影层的梯度作用**：`interleave_self_attention=false` 时，每个 `project_layers[i]` 都通过对应 cross-attn 向 VLM hidden 建立梯度路径。`interleave=true` 时，奇数 DiT block 为 self-attn，对应奇数下标 projector 输出未被动作头使用，不能声称所有 VLM 层都收到独立动作梯度。即使全部层参与，所谓“底层只学空间、顶层只学语义”也只是常见表征解释，不是该代码直接保证的监督分解。
 
 #### QwenFast 梯度流
 
@@ -1762,7 +1814,6 @@ graph TB
     LOSS["CE Loss<br>(action tokens only)"] --> LM["LM Head<br>embed → vocab logits<br>✅ (共享参数)"]
     LM --> VLM["Qwen-VL 全部层<br>✅ 可训练"]
 
-    style LOSS fill:#fadbd8
 ```
 
 QwenFast 的梯度最为简洁：标准 language modeling 梯度直接从 LM head 流向所有 VLM 参数。**无独立动作模块**，所有参数在统一的 CE loss 下更新。
@@ -1777,7 +1828,7 @@ QwenFast 的梯度最为简洁：标准 language modeling 梯度直接从 LM hea
 | LangForce | Action + LLR | $\mathcal{L}_\text{action} + \lambda \mathcal{L}_\text{LLR}$ | 双分支 |
 | Co-training VLM | VLM CE | $-\sum_t \log p(w_t \| w_{<t})$ | VLM LM head |
 
-**Co-training 损失组合**（通过 `compute_loss()` 路由，[base_framework.py:145-181](starVLA/model/framework/base_framework.py#L145-L181)）：
+**Co-training 损失组合**（通过 `compute_loss()` 路由，[base_framework.py:145-181](../../starVLA/model/framework/base_framework.py#L145-L181)）：
 
 ```python
 def compute_loss(self, tag, batch, loss_scale=None):
@@ -1859,7 +1910,7 @@ with torch.autocast("cuda", dtype=torch.float32):     # 动作头
 **starVLA 对应**: QwenOFT（机制 6.5）, QwenAdapter（机制 6.12）
 
 **优势**: 保持连续精度、推理快
-**劣势**: VLM 特征利用不够深入（仅用最后一层）
+**劣势**: 若只读取最后层，可能丢失中间层空间细节；但 action-query 方案也可抽取多层特征，不能把所有 MLP/OFT 一概归为“仅最后一层”
 
 #### 第三代：VLM + Flow-matching DiT（2024 下半年）
 
@@ -1872,16 +1923,26 @@ with torch.autocast("cuda", dtype=torch.float32):     # 动作头
 **优势**: 表达力强的连续动作分布、多步去噪精化
 **劣势**: 推理需多步迭代
 
-#### 第四代：逐层融合 + 统一状态编码（2025）
+#### 第四代：逐层融合、共享专家与统一状态编码（2025）
 
-**代表**: π₀.5 (Physical Intelligence), GR00T N1.5 (NVIDIA)
+**代表**: π₀.5 (Physical Intelligence)、GR00T N1.5/N1.6 (NVIDIA)、InternVLA-M1
 
-**核心思想**: 利用 VLM 所有层的 hidden states，将状态离散化注入文本，实现更深层的模态融合。
+**核心思想**: 通过共享 action expert、选择或路由多层 VLM 表征、状态 token 化或 latent bottleneck，实现更深层的语义—动作交互。不同模型并不都“使用 VLM 所有层”。
 
 **starVLA 对应**: QwenPI_v3（机制 6.3 + 6.10）, PI05（机制 6.7 + 6.10）
 
 **优势**: 多层次信息利用、零参数状态编码
 **劣势**: 参数量大（每层投影层）、离散化状态有精度损失
+
+#### 第五代：多流对齐、语言约束与 World-Action Model（2026）
+
+**代表**: Qwen-RobotManip、LangForce、RLDX-1、InternVLA-A1.5、DreamZero、Kairos、π₀.7
+
+**核心思想**: 从“换一个动作头”转向数据与表征对齐、多流交互、未来 latent、世界—动作联合建模，以及显式抑制视觉捷径。
+
+**证据**: 这类模型主要在 LIBERO-Plus、RoboTwin Randomized、RoboCasa365、DOMINO 和真机赛道上体现差异，而不是只追求已接近饱和的 LIBERO 域内分数。
+
+**风险**: 训练数据、推理算力和评测协议差异巨大，尚缺覆盖所有模型的统一复测。
 
 ### 10.3 starVLA 的独特贡献
 
@@ -1897,11 +1958,15 @@ starVLA 并非实现某一种 VLA，而是**将所有四代技术统一到一个
 |------|----------|-----|--------|------|------|
 | RT-2 | 2023.07 | PaLM-E | Token 预测 | 自回归 | 首个大规模 VLA |
 | OpenVLA | 2024.06 | Prismatic-7B | MLP L1 | Token 拼接 | 首个开源 VLA |
-| π₀ | 2024.10 | PaliGemma | Flow-matching | 交错专家 | SOTA 实际操作 |
+| π₀ | 2024.10 | PaliGemma | Flow-matching | 交错专家 | 开创共享动作专家路线 |
 | GR00T N1 | 2024.10 | Eagle-2 | Flow-matching DiT | 交叉注意力 | 多机器人泛化 |
-| π₀.5 | 2025.02 | PaliGemma | Flow-matching | 逐层+离散状态 | 零样本泛化 |
-| GR00T N1.5 | 2025.05 | Eagle-2 | Flow-matching DiT | 逐层 | 工业级部署 |
-| FLOWER | 2025 | Qwen-VL | Flow-matching | 逐层+QFormer | 统一VLM+WM |
+| π₀.5 | 2025.04 | PaliGemma | Flow-matching | 共享专家+离散状态 | 层次化与开放世界泛化 |
+| GR00T N1.5/N1.6 | 2025 | Eagle 系 | Flow-matching DiT | 双系统动作专家 | 多 embodiment 部署 |
+| InternVLA-M1 | 2025 | Qwen-VL+DINO | DDPM DiT | QFormer latent 瓶颈 | 固定通信量、CFG |
+| Qwen-RobotManip | 2026.06 | Qwen-VL | 连续动作专家 | 规模化对齐 | 强 OOD 与跨 embodiment |
+| RLDX-1 | 2026.05 | 多模态 backbone | Flow-matching | 多流交互 | 状态/历史/触觉扩展 |
+| InternVLA-A1.5 | 2026.07 | Qwen3.5 | Flow-matching expert | foresight latent | 动态与组合泛化 |
+| DreamZero / Kairos | 2026 | 视频/世界模型 | 联合 ActionDiT | World-Action | 未来建模与动作联合 |
 | **starVLA** | 2025-2026 | 多种可选 | 多种可选 | **12 种可选** | **可组合平台** |
 
 ---
@@ -1918,10 +1983,10 @@ starVLA 并非实现某一种 VLA，而是**将所有四代技术统一到一个
 | **QwenOFT** | Qwen-VL (Action) | MLP L1 | 序列内回归 | 离散化文本(可选) | ~4.5B |
 | **QwenDual** | Qwen-VL + DINOv2 | FlowmatchingActionHead | 双编码器→DiT | MLP | ~5.5B |
 | **QwenAdapter** | Qwen-VL | VLA-Adapter | Hook 注入 | ProprioProjector | ~4.8B |
-| **M1** | Qwen-VL + DINOv2 | DiT | QFormer 聚合 | MLP | ~6B |
-| **PI0** | PaliGemma | OpenPI0ActionHead | 交错专家 | 离散化文本 | ~3B |
+| **InternVLA-M1** | Qwen-VL + DINOv2 | DDPM DiT + CFG | QFormer 聚合 | 无显式 state 路径 | ~6B |
+| **PI0** | PaliGemma | OpenPI0ActionHead | 交错专家 | 连续 state projection | ~3B |
 | **PI05** | PaliGemma | OpenPI05ActionHead | 交错专家+adaRMS | 离散化文本 | ~3B |
-| **LangForce** | Qwen-VL | Flow-matching | 双分支分解 | MLP | ~8B |
+| **LangForce** | Qwen-VL | Flow-matching | 同一 VLM 双前向 + PMI/LLR | MLP | 取决于 backbone；并非两套 VLM 参数 |
 | **WanGR00T** | Wan2.2 WM | FlowmatchingActionHead | WM→DiT | MLP | ~15B+ |
 | **WanPI** | Wan2.2 WM | LayerwiseFM | WM 逐层→DiT | MLP | ~15B+ |
 | **CosmoPredict2GR00T** | CosmoPredict2 WM | FlowmatchingActionHead | WM→DiT | MLP | ~10B+ |
@@ -1960,51 +2025,46 @@ starVLA 并非实现某一种 VLA，而是**将所有四代技术统一到一个
 
 ### 11.3 融合机制维度分析
 
-从不同维度对 12 种融合机制进行雷达图式对比：
+第 6.13 节已按条件路径、动作空间、NFE、优势和风险给出机制矩阵。这里不再用主观星级把“动作精度”归因给单个结构，因为公开结果表明：
 
-| 维度 | Token拼接 | 单层DiT | 逐层DiT | 交错专家 | 自回归 | MLP回归 |
-|------|----------|---------|---------|---------|--------|---------|
-| 信息利用深度 | ★★★★★ | ★★☆☆☆ | ★★★★★ | ★★★★★ | ★★★★★ | ★★☆☆☆ |
-| 额外参数开销 | ★★★★★ | ★★★☆☆ | ★★☆☆☆ | ★☆☆☆☆ | ★★★★★ | ★★★★☆ |
-| 推理速度 | ★★★★★ | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | ★☆☆☆☆ | ★★★★★ |
-| 动作精度 | N/A | ★★★★☆ | ★★★★★ | ★★★★★ | ★★★☆☆ | ★★★☆☆ |
-| 实现复杂度 | ★★★★★ | ★★★★☆ | ★★★☆☆ | ★★☆☆☆ | ★★★★☆ | ★★★★★ |
+- 同一 Qwen3-VL 的 LIBERO 表中，OFT 96.6、GR00T 96.5、逐层 π 95.7、FAST 95.4，结构复杂度与域内平均分并不单调。
+- SimplerEnv Bridge+RT-1 中，PI_v3 69.8 高于 GR00T 65.3、FAST 58.6、OFT 42.7，连续生成与逐层条件在该设置更有优势。
+- LIBERO-Plus、DOMINO、RoboCasa365 更依赖数据对齐、未来 latent、多流信息和语言约束，而不只是解码器类别。
 
-（★ 越多越好，信息利用深度=利用多少层VLM信息；额外参数开销=引入的额外参数越少越好）
+因此选型应同时报告 backbone、训练数据、动作 horizon、NFE 和评测协议。
 
 ### 11.4 设计取舍空间
 
 ```mermaid
 graph LR
-    subgraph "速度优先"
+    subgraph speedPriority [速度优先]
         OFT["QwenOFT<br>单步推理"]
-        FAST["QwenFast*<br>*推理慢但简单"]
+        ADAPT["QwenAdapter<br>单步回归"]
     end
 
-    subgraph "精度优先"
+    subgraph distributionPriority [连续分布建模]
         PI["QwenPI_v3<br>逐层融合"]
         PI0["PI0/PI05<br>交错专家"]
     end
 
-    subgraph "泛化优先"
-        GR["QwenGR00T<br>标准架构"]
-        WM["WanGR00T<br>世界模型"]
+    subgraph generalizationPriority [OOD与动态泛化]
+        LF["LangForce<br>语言约束"]
+        WM["World-Action<br>未来表征"]
     end
 
-    subgraph "研究优先"
-        LF["LangForce<br>理论驱动"]
+    subgraph researchPriority [多源与研究扩展]
         M1["M1<br>多编码器"]
-        AD["QwenAdapter<br>轻量适配"]
+        MULTI["RLDX式<br>多流交互"]
     end
 ```
 
 **选择建议**：
 
-- **快速原型验证** → QwenOFT（最快推理，最少参数）
-- **最高操作精度** → QwenPI_v3 或 PI05（逐层融合 + flow-matching）
-- **多机器人泛化** → QwenGR00T（标准架构，multi-embodiment 支持）
-- **利用物理先验** → WanGR00T / CosmoPredict2GR00T（世界模型特征）
-- **学术探索** → LangForce（贝叶斯分解）、M1（QFormer 聚合）
+- **快速原型与低延迟** → QwenOFT / QwenAdapter（单次回归，头部小）
+- **连续多峰轨迹** → QwenGR00T / QwenPI_v3 / PI05（flow matching，需多步推理）
+- **指令歧义** → LangForce 或其他显式语言约束路线
+- **动态与长时程** → foresight latent / World-Action Model；需同时评估延迟
+- **多机器人、多传感器** → multi-stream 或类别专用 action encoder；性能取决于跨 embodiment 对齐数据
 
 ---
 
@@ -2017,13 +2077,13 @@ graph LR
 2. **融合机制多样性**：12 种融合机制覆盖了从最简单的 token 拼接到最复杂的交错专家注意力的完整谱系
 
 3. **设计趋势**：
-   - **从单层到逐层**：VLM hidden state 的利用从仅最后一层（GR00T N1）到所有层（π₀.5/PI_v3）
+   - **从单层到多层/共享层**：本地 GR00T 复用最后层，PI 系按 block 路由多层 hidden，π0 系让 VLM 与 action expert 逐层联合注意力；三者不是同一种“逐层”
    - **从外部到内部**：状态编码从外部 MLP 到直接嵌入 VLM 文本（离散化）
    - **从分离到统一**：动作头从独立模块到与 VLM 共享参数（FAST/交错专家）
 
-4. **Flow-matching 主导**：在 18 个框架中，14 个使用 flow-matching 变体作为动作生成方式
+4. **Flow-matching 主导但非唯一**：GR00T、PI、WM4A 和 LangForce 大量复用 flow matching；同时存在 OFT L1、FAST AR、MaskGIT 离散扩散和 M1 DDPM
 
-5. **条件化机制收敛**：AdaLayerNorm 是事实标准（14 框架使用），adaRMS 仅在 PI05 中出现
+5. **条件化机制分化**：FM/Layerwise DiT 主力使用 timestep→AdaLayerNorm；PI05 使用 adaRMS；M1 使用 timestep/label embedding+CFG；OFT/Adapter 无扩散时间条件
 
 ### 12.2 未来方向
 
@@ -2059,254 +2119,20 @@ starVLA 的模块化设计使其成为研究 VLA 缩放定律的理想平台：
 
 | 文件路径 | 职责 |
 |----------|------|
-| [base_framework.py](starVLA/model/framework/base_framework.py) | 基类定义、框架注册、`build_framework()` |
-| [QwenGR00T.py](starVLA/model/framework/VLM4A/QwenGR00T.py) | Qwen-VL + Flow-matching DiT |
-| [QwenPI_v3.py](starVLA/model/framework/VLM4A/QwenPI_v3.py) | 逐层交叉注意力 + 离散化状态 |
-| [QwenFast.py](starVLA/model/framework/VLM4A/QwenFast.py) | FAST 自回归离散 token |
-| [QwenOFT.py](starVLA/model/framework/VLM4A/QwenOFT.py) | MLP L1 回归 + 动作 token 注入 |
-| [PI0.py](starVLA/model/framework/VLM4A/PI0.py) | PaliGemma + Gemma 交错专家 |
-| [M1.py](starVLA/model/framework/VLM4A/M1.py) | Qwen-VL + DINOv2 + QFormer |
-| [LangForce.py](starVLA/model/framework/VLM4A/LangForce.py) | 双分支贝叶斯分解 |
-| [QwenAdapter.py](starVLA/model/framework/VLM4A/QwenAdapter.py) | VLA-Adapter + ProprioProjector |
-| [WanGR00T.py](starVLA/model/framework/WM4A/WanGR00T.py) | Wan2.2 世界模型 + 动作头 |
-| [GR00T_ActionHeader.py](starVLA/model/modules/action_model/GR00T_ActionHeader.py) | FlowmatchingActionHead |
-| [LayerwiseFM_ActionHeader.py](starVLA/model/modules/action_model/LayerwiseFM_ActionHeader.py) | LayerwiseFlowmatchingActionHead |
-| [cross_attention_dit.py](starVLA/model/modules/action_model/flow_matching_head/cross_attention_dit.py) | DiT + AdaLayerNorm + BasicTransformerBlock |
-| [QWen3.py](starVLA/model/modules/vlm/QWen3.py) | Qwen3-VL 接口包装 |
-| [dino.py](starVLA/model/modules/dino_model/dino.py) | DINOv2 视觉骨干 |
-| [trainer_tools.py](starVLA/training/trainer_utils/trainer_tools.py) | freeze_backbones, build_param_lr_groups |
-| [train_starvla.py](starVLA/training/train_starvla.py) | VLA 训练入口 |
-
-# QwenPi 的模态融合与动作条件
-
-**结论：QwenPI 的动作头是「VLM 多层 hidden → 逐层 cross-attn DiT + Flow Matching」条件化；旗舰变体 QwenPI_v3 再加「逐层投影压缩」和「离散化 state 文本注入」。在 SimplerEnv 上 PI_v3 最强（69.8%），LIBERO 上 Spatial/Object 顶尖但 Long 偏弱，Calvin 上略逊于同系列 GR00T。**
-
----
-
-## 1. 动作头条件化机制（代码级）
-
-### 1.1 总览：三路条件汇入 DiT
-
-```mermaid
-flowchart TB
-  subgraph Cond["条件来源"]
-    IMG["多视角图像"]
-    LANG["语言指令"]
-    STATE["本体感觉 state"]
-  end
-
-  subgraph VLM["Qwen-VL (output_hidden_states=True)"]
-    H["hidden_states[-N:]<br/>N = DiT 层数 = VLM 层数"]
-  end
-
-  subgraph Proj["QwenPI_v3 独有"]
-    PL["project_layers[i]<br/>LN + Linear<br/>D_vlm → D_dit"]
-  end
-
-  subgraph Head["LayerwiseFlowmatchingActionHead"]
-    AE["ActionEncoder(noisy_a, t)"]
-    FT["future_tokens × 32"]
-    SE["state_encoder MLP<br/>(仅 QwenPI 路径)"]
-    DiT["Layer-wise Cross-Attn DiT"]
-    AD["ActionDecoder → velocity"]
-  end
-
-  IMG --> VLM
-  LANG --> VLM
-  STATE -->|"v3: 量化进文本"| LANG
-  STATE -->|"v1: MLP"| SE
-  H --> PL
-  PL --> DiT
-  H -->|"QwenPI: Identity"| DiT
-  AE --> DiT
-  FT --> DiT
-  SE --> DiT
-  DiT --> AD
-```
-
-核心实现链：
-
-| 组件 | 路径 |
-|------|------|
-| 框架 | `QwenPI.py` / `QwenPI_v3.py` |
-| 动作头 | `LayerwiseFM_ActionHeader.py` |
-| DiT | `flow_matching_head/cross_attention_dit.py` |
-
----
-
-### 1.2 主条件化：逐层交叉注意力（相对 GR00T 的核心差异）
-
-**QwenGR00T**：只用 `hidden_states[-1]`，所有 DiT 层共享同一 context。  
-**QwenPI**：取最后 \(N\) 层，DiT block \(i\) 只 attend 到第 \(i\) 个 VLM 层。
-
-```261:263:starVLA/model/framework/VLM4A/QwenPI_v3.py
-            vl_embs_list = list(qwenvl_outputs.hidden_states[-self.num_action_dit_layers:])
-            vl_embs_list = self._project_vl_hidden_for_action(vl_embs_list)
-        return vl_embs_list, attention_mask
-```
-
-DiT 内部路由：
-
-```296:316:starVLA/model/modules/action_model/flow_matching_head/cross_attention_dit.py
-        for idx, block in enumerate(self.transformer_blocks):
-            if idx % 2 == 1 and self.config.interleave_self_attention and self.config.use_canonical_forward:
-                hidden_states = block(
-                    hidden_states,
-                    attention_mask=None,
-                    encoder_hidden_states=None,  # 奇数层：纯自注意力
-                    ...
-                )
-            else:
-                if is_layerwise_encoder:
-                    block_encoder_hidden_states = encoder_hidden_states[idx]  # 逐层绑定
-                else:
-                    block_encoder_hidden_states = encoder_hidden_states
-                hidden_states = block(..., encoder_hidden_states=block_encoder_hidden_states, ...)
-```
-
-含义：浅层 VLM（局部视觉/句法）喂给浅层 DiT（粗动作结构），深层 VLM（任务语义）喂给深层 DiT（精细轨迹）——这就是文档第 918 行说的「多层特征，而非仅最后一层」。
-
-**注意**：已发布的 [Qwen3VL-PI_v3-Bridge-RT_1](https://huggingface.co/StarVLA/Qwen3VL-PI_v3-Bridge-RT_1) 配置里 `interleave_self_attention: false`，因此 **36 层 DiT 全部做 cross-attn**，真正用满全部 VLM 层。默认代码里 `interleave=True` 时，奇数层会变成 self-attn，奇数下标的 VLM 层实际不会进 cross-attn。
-
----
-
-### 1.3 动作序列侧条件：谁作为 DiT 的 Query？
-
-```324:339:starVLA/model/modules/action_model/LayerwiseFM_ActionHeader.py
-        future_tokens = self.future_tokens.weight.unsqueeze(0).expand(B, -1, -1)
-        sa_embs = (
-            torch.cat((state_features, future_tokens, action_features), dim=1)
-            if state_features is not None
-            else torch.cat((future_tokens, action_features), dim=1)
-        )
-        model_output = self.model(
-            hidden_states=sa_embs,
-            encoder_hidden_states=vl_embs_list,  # list → layer-wise
-            timestep=t_discretized,
-            ...
-        )
-```
-
-| 条件通道 | 角色 | 机制 |
-|----------|------|------|
-| **VLM 多层 hidden** | Cross-attn 的 K/V | 主语义/视觉条件 |
-| **noisy action + t** | Query 序列主体 | ActionEncoder 把 \(a_t\) 与时间步融合 |
-| **future_tokens × 32** | 可学习前缀 | 类似「动作规划槽位」 |
-| **timestep** | AdaLN 调制 | 每层与输出层的 scale/shift |
-| **state** | 见下 | v1 与 v3 路径不同 |
-
-训练目标是 Flow Matching 速度场 MSE：
-
-\[
-\mathcal{L} = \mathbb{E}_{t,x_0,x_1}\big\|v_\theta(x_t,t,c) - (x_1 - x_0)\big\|_2^2
-\]
-
-推理默认 **4 步 Euler**（`num_inference_timesteps=4`）。
-
----
-
-### 1.4 QwenPI vs QwenPI_v3：两条状态条件化路径
-
-| | **QwenPI** | **QwenPI_v3** |
-|--|------------|---------------|
-| 多层 cross-attn | ✅ | ✅ |
-| DiT 隐维 | \(= D_{\text{VLM}}\)（无压缩） | `action_dit_hidden_dim`（默认 1024） |
-| 投影层 | 无 | 每层独立 `LN + Linear` |
-| State | 可选：MLP → 拼到 DiT 输入 | **离散化进指令文本**，再 `state=None` |
-| 设计对齐 | π₀ / GR00T 风格层叠 | 更接近 **π₀.5** |
-
-v3 的离散化状态：
-
-```402:413:starVLA/model/framework/VLM4A/QwenPI_v3.py
-    def add_discretized_state_to_instruction(self, instructions, states):
-        ...
-            updated_instructions.append(f"{instr} [STATE] {state_str} [ACTION]")
-```
-
-即：状态走 **VLM 文本注意力**，不再走动作头里的 MLP。已发布 OXE 模型约 5.07B（VLM 87.5% / DiT 10.6% / 投影层 1.9%）。
-
----
-
-## 2. 各 Benchmark 表现
-
-仓库里有公开数字的主要是 **SimplerEnv、LIBERO、Calvin**；RoboTwin / Robocasa 官方 README 主推 OFT 等，**未公布 QwenPI 数字**。
-
-### 2.1 SimplerEnv WidowX（OXE Bridge + RT-1）
-
-| 模型 | Avg Success |
-|------|-------------|
-| QWen2.5-OFT | 41.8 |
-| QWen2.5-FAST | 58.6 |
-| **QWen2.5-PI** | **62.5** |
-| QWen2.5-GR00T | 63.6 |
-| QWen3VL-GR00T | 65.3 |
-| **QWen3VL-PI_v3** | **69.8** ← 同设定最强 |
-
-PI_v3 @ 50k 分任务（HF model card）：
-
-| PutCarrot | PutEggplant | PutSpoon | StackCube | **Avg** |
-|-----------|-------------|----------|-----------|---------|
-| 62.5% | 100% | 79.2% | 37.5% | **69.8%** |
-
-相对同 backbone 的 GR00T（单层 cross-attn）：**+4.5 pp**（65.3 → 69.8），说明在该设定下逐层条件化有效。
-
-### 2.2 LIBERO（四套件合训，StarVLA-π = QwenPI 系）
-
-| 模型 | Spatial | Object | Goal | Long | **Avg** |
-|------|---------|--------|------|------|---------|
-| StarVLA-π (Qwen2.5-VL) | 98.2 | 99.2 | 95.6 | 88.4 | **95.4** |
-| StarVLA-π (Qwen3-VL) | **98.8** | **99.6** | 95.8 | 88.4 | **95.7** |
-| StarVLA-OFT (Qwen3-VL) | 97.8 | 98.6 | 96.2 | **93.8** | **96.6** |
-| StarVLA-GR00T (Qwen3-VL) | 97.8 | 98.8 | 97.4 | 92.0 | 96.5 |
-
-解读：
-
-- **Spatial / Object**：π 系最强（接近饱和）。
-- **Long**：明显弱于 OFT/GR00T（88.4 vs 93.8/92.0）——长程时序上，纯 flow-matching 逐层头未必最优。
-- 整体 Avg 与 GR00T 接近，略低于 OFT。
-
-### 2.3 Calvin D→D
-
-| 模型 | Avg Length | T1…T5 |
-|------|------------|-------|
-| qwenpi (Qwen2.5-3B-Action) | **3.576** | 90.9 / 79.5 / 69.6 / 62.2 / 55.4 |
-| qwenpi (Qwen3-4B) | 3.472 | 87.7 / 75.2 / 67.4 / 61.8 / 55.1 |
-| qwengr00t (Qwen2.5-3B-Action) | **3.786** | 更高 |
-| PI0.5* | 3.885 | 最高参考 |
-
-Calvin 上 **PI 略逊于同 VLM 的 GR00T**，与 SimplerEnv 趋势相反——可能与 Calvin 配置（`include_state: false`、`interleave: true`、未用 v3 离散 state）有关。
-
-### 2.4 其他
-
-| Benchmark | QwenPI 公开结果 |
-|-----------|-----------------|
-| RoboTwin 2.0 | 无（主推 OFT） |
-| Robocasa | 无 |
-| 真机 | 无系统表格 |
-
----
-
-## 3. 机制 ↔ 成绩：怎么读
-
-```mermaid
-flowchart LR
-  A["逐层 VLM→DiT"] --> B["细粒度视觉-动作对齐"]
-  B --> C["SimplerEnv +4.5 vs GR00T"]
-  B --> D["LIBERO Spatial/Object 近饱和"]
-  E["Flow Matching 短 horizon"] --> F["LIBERO-Long 偏弱"]
-  G["离散 state 进文本 v3"] --> H["OXE WidowX 69.8"]
-  I["单层 + MLP state GR00T"] --> J["Calvin 更稳"]
-```
-
-| 场景 | 更合适的头 |
-|------|------------|
-| 短时精确操作（WidowX pick-place） | **QwenPI_v3**（逐层 + 离散 state） |
-| LIBERO Spatial/Object | **StarVLA-π** |
-| 长程 / 多步（LIBERO-Long、Calvin 链） | OFT 或 GR00T 往往更稳 |
-| 参数预算紧、要贴近 π₀.5 | PI_v3（投影把 DiT 压到 1024） |
-
----
-
-## 4. 一句话对照文档第 918 行
-
-文档说「利用 VLM 多层特征」在代码里就是：`vl_embs_list = hidden_states[-N:]` + DiT `encoder_hidden_states[idx]` 的 **layer-wise cross-attention Flow Matching**；QwenPI_v3 再叠 **per-layer projector** 与 **π₀.5 式离散 state 文本条件**。公开成绩上，它是 **SimplerEnv WidowX 最强 StarVLA 变体（69.8%）**，在 LIBERO 上 **短任务顶尖、长任务偏弱**，Calvin 上 **略低于 GR00T**。
+| [base_framework.py](../../starVLA/model/framework/base_framework.py) | 基类定义、框架注册、`build_framework()` |
+| [QwenGR00T.py](../../starVLA/model/framework/VLM4A/QwenGR00T.py) | Qwen-VL + Flow-matching DiT |
+| [QwenPI_v3.py](../../starVLA/model/framework/VLM4A/QwenPI_v3.py) | 逐层交叉注意力 + 离散化状态 |
+| [QwenFast.py](../../starVLA/model/framework/VLM4A/QwenFast.py) | FAST 自回归离散 token |
+| [QwenOFT.py](../../starVLA/model/framework/VLM4A/QwenOFT.py) | MLP L1 回归 + 动作 token 注入 |
+| [PI0.py](../../starVLA/model/framework/VLM4A/PI0.py) | PaliGemma + Gemma 交错专家 |
+| [M1.py](../../starVLA/model/framework/VLM4A/M1.py) | Qwen-VL + DINOv2 + QFormer |
+| [LangForce.py](../../starVLA/model/framework/VLM4A/LangForce.py) | 双分支贝叶斯分解 |
+| [QwenAdapter.py](../../starVLA/model/framework/VLM4A/QwenAdapter.py) | VLA-Adapter + ProprioProjector |
+| [WanGR00T.py](../../starVLA/model/framework/WM4A/WanGR00T.py) | Wan2.2 世界模型 + 动作头 |
+| [GR00T_ActionHeader.py](../../starVLA/model/modules/action_model/GR00T_ActionHeader.py) | FlowmatchingActionHead |
+| [LayerwiseFM_ActionHeader.py](../../starVLA/model/modules/action_model/LayerwiseFM_ActionHeader.py) | LayerwiseFlowmatchingActionHead |
+| [cross_attention_dit.py](../../starVLA/model/modules/action_model/flow_matching_head/cross_attention_dit.py) | DiT + AdaLayerNorm + BasicTransformerBlock |
+| [QWen3.py](../../starVLA/model/modules/vlm/QWen3.py) | Qwen3-VL 接口包装 |
+| [dino.py](../../starVLA/model/modules/dino_model/dino.py) | DINOv2 视觉骨干 |
+| [trainer_tools.py](../../starVLA/training/trainer_utils/trainer_tools.py) | freeze_backbones, build_param_lr_groups |
+| [train_starvla.py](../../starVLA/training/train_starvla.py) | VLA 训练入口 |
